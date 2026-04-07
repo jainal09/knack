@@ -2,7 +2,7 @@
 """NATS JetStream producer — max throughput benchmark.
 
 Runs NUM_PRODUCERS concurrent producer tasks for TEST_DURATION_SEC seconds.
-No artificial rate cap — the broker’s resource limits are the only throttle.
+No artificial rate cap — the broker's resource limits are the only throttle.
 Uses asyncio with semaphore-bounded concurrency.
 """
 
