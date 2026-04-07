@@ -1,5 +1,34 @@
 # NATS vs Kafka Experiment
 
+## Running Infra
+
+**Start everything (brokers + UIs) in one shot:**
+
+```bash
+docker compose -f infra/docker-compose.kafka.yml -f infra/docker-compose.nats.yml --profile tools up -d
+```
+
+### Brokers
+
+```bash
+docker compose -f infra/docker-compose.kafka.yml up -d   # Kafka    → localhost:9092
+docker compose -f infra/docker-compose.nats.yml up -d     # NATS     → localhost:4222
+```
+
+### UIs (append `--profile tools`)
+
+```bash
+docker compose -f infra/docker-compose.kafka.yml --profile tools up -d   # + Redpanda Console → localhost:9080
+docker compose -f infra/docker-compose.nats.yml --profile tools up -d    # + Nui → localhost:31311, nats-box CLI
+```
+
+### Teardown
+
+```bash
+docker compose -f infra/docker-compose.kafka.yml down -v
+docker compose -f infra/docker-compose.nats.yml down -v
+```
+
 ## Setup (one time)
 
 ```bash
@@ -13,6 +42,7 @@ uv sync
 ./run_all.sh --quick                  # smoke test (~15 min)
 ./run_all.sh --duration 120           # 2 min per throughput run
 ./run_all.sh --duration 300 --reps 2  # 5 min runs, 2 reps
+./run_all.sh --ui                     # start UIs (Redpanda Console, Nui) with each broker
 ./run_all.sh --help                   # see all options
 ```
 
@@ -53,16 +83,6 @@ uv run python3 bench/aggregate_results.py
 
 Writes `results/full_report.json` and prints the recommendation.
 
-## Optional: UI tools
-
-```bash
-# Kafka + Redpanda Console (http://localhost:9080)
-docker compose -f infra/docker-compose.kafka.yml --profile tools up -d
-
-# NATS + Nui (http://localhost:31311) + nats-box CLI
-docker compose -f infra/docker-compose.nats.yml --profile tools up -d
-```
-
 ## Where results live
 
 ```text
@@ -95,7 +115,4 @@ TEST_DURATION_SEC=30 BASELINE_RATE=100 NUM_PRODUCERS=1 uv run python3 bench/prod
 
 ## Cleanup
 
-```bash
-docker compose -f infra/docker-compose.kafka.yml down -v
-docker compose -f infra/docker-compose.nats.yml down -v
-```
+See [Teardown](#teardown) above.

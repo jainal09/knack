@@ -34,6 +34,8 @@ while [[ $# -gt 0 ]]; do
       export NUM_PRODUCERS="$2"; shift 2 ;;
     --memory)
       export BENCH_MEMORY="$2"; shift 2 ;;
+    --ui)
+      export COMPOSE_PROFILES="tools"; shift ;;
     -h|--help)
       echo "Usage: $0 [OPTIONS]"
       echo ""
@@ -45,6 +47,7 @@ while [[ $# -gt 0 ]]; do
       echo "  --rate N             Baseline msg/sec per producer (default: 5000)"
       echo "  --producers N        Number of producers (default: 4)"
       echo "  --memory SIZE        Broker memory limit, e.g. 2g (default: 4g)"
+      echo "  --ui                 Start UI containers alongside brokers"
       echo "  -h, --help           Show this help"
       exit 0 ;;
     *) echo "Unknown option: $1"; exit 1 ;;
@@ -56,7 +59,7 @@ mkdir -p "$PROJECT_ROOT/results"
 echo "============================================"
 echo "  Kafka vs NATS JetStream Benchmark Suite"
 echo "  Started: $(date -Iseconds)"
-echo "  CPUs: ${BENCH_CPUS} | RAM: ${BENCH_MEMORY}"
+echo "  CPUs: ${BENCH_CPUS} | RAM: ${BENCH_MEMORY} | UI: ${COMPOSE_PROFILES:-off}"
 echo "============================================"
 echo ""
 
