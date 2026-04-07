@@ -73,7 +73,8 @@ async def main():
     await asyncio.sleep(2)
 
     print(
-        f"Producing at {TARGET_RATE} msg/s (50% of peak {PEAK_RATE}) for {DURATION}s ..."
+        f"Producing at {TARGET_RATE} msg/s (50% of peak {PEAK_RATE}) for {DURATION}s ...",
+        file=sys.stderr,
     )
     t0 = time.monotonic()
     sent = 0

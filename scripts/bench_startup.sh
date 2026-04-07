@@ -3,13 +3,15 @@
 set -euo pipefail
 PROJECT_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 source "$PROJECT_ROOT/env.sh"
-mkdir -p "$PROJECT_ROOT/results"
+source "$PROJECT_ROOT/scripts/_log.sh"
+RESULTS_DIR="${RESULTS_DIR:-$PROJECT_ROOT/results}"
+mkdir -p "$RESULTS_DIR"
 
 time_to_ready() {
   local name="$1" compose="$2" port="$3"
-  echo "========================================"
-  echo "  Startup & Recovery: $name"
-  echo "========================================"
+  log "========================================"
+  log "  Startup & Recovery: $name"
+  log "========================================"
 
   # --- Clean startup ---
   docker compose -f "$compose" down -v 2>/dev/null || true
@@ -24,7 +26,7 @@ time_to_ready() {
     sleep 0.1
     timeout_count=$((timeout_count + 1))
     if [[ $timeout_count -gt 600 ]]; then
-      echo "ERROR: $name did not become ready within 60s"
+      echo "ERROR: $name did not become ready within 60s" >&2
       docker compose -f "$compose" logs
       docker compose -f "$compose" down -v
       return 1
@@ -33,14 +35,24 @@ time_to_ready() {
   end=$(date +%s%N)
 
   ms=$(( (end - start) / 1000000 ))
-  echo "Startup: ${ms} ms"
-  echo "{\"broker\":\"$name\",\"type\":\"startup\",\"ms\":$ms}" | tee "$PROJECT_ROOT/results/${name}_startup.json"
+  log "Startup: ${ms} ms"
+  echo "{\"broker\":\"$name\",\"type\":\"startup\",\"ms\":$ms}" | tee "$RESULTS_DIR/${name}_startup.json"
 
   # --- Recovery after SIGKILL ---
   echo ""
-  echo "Hard-killing $name (SIGKILL)..."
+  log "Hard-killing $name (SIGKILL)..."
   docker compose -f "$compose" kill -s SIGKILL
   sleep 2
+
+  # Wait for port to close before starting timer
+  local close_count=0
+  while nc -z localhost "$port" 2>/dev/null; do
+    sleep 0.1
+    close_count=$((close_count + 1))
+    if [[ $close_count -gt 100 ]]; then
+      break
+    fi
+  done
 
   start=$(date +%s%N)
   docker compose -f "$compose" up -d
@@ -50,7 +62,7 @@ time_to_ready() {
     sleep 0.1
     timeout_count=$((timeout_count + 1))
     if [[ $timeout_count -gt 600 ]]; then
-      echo "ERROR: $name did not recover within 60s"
+      echo "ERROR: $name did not recover within 60s" >&2
       docker compose -f "$compose" logs
       docker compose -f "$compose" down -v
       return 1
@@ -59,8 +71,8 @@ time_to_ready() {
   end=$(date +%s%N)
 
   ms=$(( (end - start) / 1000000 ))
-  echo "Recovery: ${ms} ms"
-  echo "{\"broker\":\"$name\",\"type\":\"recovery\",\"ms\":$ms}" >> "$PROJECT_ROOT/results/${name}_startup.json"
+  log "Recovery: ${ms} ms"
+  echo "{\"broker\":\"$name\",\"type\":\"recovery\",\"ms\":$ms}" >> "$RESULTS_DIR/${name}_startup.json"
 
   docker compose -f "$compose" down -v
   echo ""
@@ -69,4 +81,4 @@ time_to_ready() {
 time_to_ready "kafka" "$PROJECT_ROOT/infra/docker-compose.kafka.yml" 9092
 time_to_ready "nats"  "$PROJECT_ROOT/infra/docker-compose.nats.yml"  4222
 
-echo "=== Startup/recovery benchmark complete. Results in results/*_startup.json ==="
+log "=== Startup/recovery benchmark complete. Results in results/*_startup.json ==="

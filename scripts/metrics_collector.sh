@@ -3,9 +3,10 @@
 # Usage: ./scripts/metrics_collector.sh &   (run in background, kill when done)
 set -euo pipefail
 PROJECT_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-mkdir -p "$PROJECT_ROOT/results"
+RESULTS_DIR="${RESULTS_DIR:-$PROJECT_ROOT/results}"
+mkdir -p "$RESULTS_DIR"
 
-OUTFILE="$PROJECT_ROOT/results/docker_stats.csv"
+OUTFILE="$RESULTS_DIR/docker_stats.csv"
 
 # Write header if file doesn't exist
 if [[ ! -f "$OUTFILE" ]]; then

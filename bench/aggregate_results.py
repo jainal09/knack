@@ -13,7 +13,7 @@ _project_root = Path(__file__).resolve().parent.parent
 _kafka_env = dotenv_values(_project_root / "kafka-client.env")
 _nats_env = dotenv_values(_project_root / "nats-client.env")
 
-RESULTS_DIR = str(_project_root / "results")
+RESULTS_DIR = os.environ.get("RESULTS_DIR", str(_project_root / "results"))
 
 
 def load_json(path):

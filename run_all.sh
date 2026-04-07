@@ -9,9 +9,47 @@
 #
 set -euo pipefail
 PROJECT_ROOT="$(cd "$(dirname "$0")" && pwd)"
+
+# ─── Preflight dependency check ──────────────────────────────────────────────
+_missing=0
+for cmd in docker uv nc; do
+  if ! command -v "$cmd" &>/dev/null; then
+    echo "ERROR: '$cmd' not found." >&2
+    case "$cmd" in
+      docker) echo "  Install: https://docs.docker.com/engine/install/" >&2 ;;
+      uv)     echo "  Install: curl -LsSf https://astral.sh/uv/install.sh | sh" >&2 ;;
+      nc)     echo "  Install: sudo apt install netcat-openbsd  (or brew install netcat on macOS)" >&2 ;;
+    esac
+    _missing=1
+  fi
+done
+if ! docker compose version &>/dev/null 2>&1; then
+  echo "ERROR: 'docker compose' (v2) not available. Install the Compose plugin." >&2
+  echo "  See: https://docs.docker.com/compose/install/" >&2
+  _missing=1
+fi
+for opt_cmd in kcat nats; do
+  case "$opt_cmd" in
+    kcat)
+      if ! command -v kcat &>/dev/null && ! command -v kafkacat &>/dev/null; then
+        echo "WARNING: 'kcat' (or 'kafkacat') not found — Kafka CLI throughput benchmark will be skipped." >&2
+        echo "  Install: sudo apt install kafkacat  (or brew install kcat on macOS)" >&2
+      fi ;;
+    nats)
+      if ! command -v nats &>/dev/null; then
+        echo "WARNING: 'nats' CLI not found — NATS CLI throughput benchmark will be skipped." >&2
+        echo "  Install: brew install nats-io/nats-tools/nats" >&2
+        echo "       or: https://github.com/nats-io/natscli/releases" >&2
+      fi ;;
+  esac
+done
+[[ $_missing -eq 0 ]] || { echo "\nFix the above and re-run." >&2; exit 1; }
+# ─────────────────────────────────────────────────────────────────────────────
+
 source "$PROJECT_ROOT/env.sh"
 
 # --- CLI overrides ---
+RESUME=0
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --quick)
@@ -19,8 +57,7 @@ while [[ $# -gt 0 ]]; do
       export REPS=1
       export IDLE_WAIT=30
       export LATENCY_DURATION_SEC=30
-      export BASELINE_RATE=100
-      export NUM_PRODUCERS=1
+      export NUM_PRODUCERS=2
       shift ;;
     --duration)
       export TEST_DURATION_SEC="$2"; shift 2 ;;
@@ -28,14 +65,16 @@ while [[ $# -gt 0 ]]; do
       export REPS="$2"; shift 2 ;;
     --idle-wait)
       export IDLE_WAIT="$2"; shift 2 ;;
-    --rate)
-      export BASELINE_RATE="$2"; shift 2 ;;
     --producers)
       export NUM_PRODUCERS="$2"; shift 2 ;;
     --memory)
       export BENCH_MEMORY="$2"; shift 2 ;;
     --ui)
       export COMPOSE_PROFILES="tools"; shift ;;
+    --results-dir)
+      export RESULTS_DIR="$2"; shift 2 ;;
+    --resume)
+      RESUME=1; shift ;;
     -h|--help)
       echo "Usage: $0 [OPTIONS]"
       echo ""
@@ -44,63 +83,160 @@ while [[ $# -gt 0 ]]; do
       echo "  --duration SEC       Throughput test duration per run (default: 600)"
       echo "  --reps N             Number of throughput repetitions (default: 3)"
       echo "  --idle-wait SEC      Idle wait time in seconds (default: 300)"
-      echo "  --rate N             Baseline msg/sec per producer (default: 5000)"
       echo "  --producers N        Number of producers (default: 4)"
       echo "  --memory SIZE        Broker memory limit, e.g. 2g (default: 4g)"
       echo "  --ui                 Start UI containers alongside brokers"
+      echo "  --results-dir DIR    Output directory for results"
+      echo "  --resume             Resume from last checkpoint (skip completed steps)"
       echo "  -h, --help           Show this help"
       exit 0 ;;
     *) echo "Unknown option: $1"; exit 1 ;;
   esac
 done
 
-mkdir -p "$PROJECT_ROOT/results"
+export RESULTS_DIR="${RESULTS_DIR:-$PROJECT_ROOT/results}"
+mkdir -p "$RESULTS_DIR"
 
-echo "============================================"
-echo "  Kafka vs NATS JetStream Benchmark Suite"
-echo "  Started: $(date -Iseconds)"
-echo "  CPUs: ${BENCH_CPUS} | RAM: ${BENCH_MEMORY} | UI: ${COMPOSE_PROFILES:-off}"
-echo "============================================"
+# ─── Centralised logging ────────────────────────────────────────────────────
+LOG_FILE="$RESULTS_DIR/benchmark_$(date +%Y%m%d_%H%M%S).log"
+exec > >(tee -a "$LOG_FILE") 2>&1
+
+log() {
+  printf '[%s] %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*"
+}
+
+log "Log file: $LOG_FILE"
+# ─────────────────────────────────────────────────────────────────────────────
+
+# ─── Checkpoint helpers ──────────────────────────────────────────────────────
+CHECKPOINT_FILE="$RESULTS_DIR/checkpoint.log"
+
+step_done() {
+  # Returns 0 (true) if step already completed in checkpoint file
+  [[ $RESUME -eq 1 ]] && grep -qxF "$1" "$CHECKPOINT_FILE" 2>/dev/null
+}
+
+mark_done() {
+  echo "$1" >> "$CHECKPOINT_FILE"
+}
+
+if [[ $RESUME -eq 1 && -f "$CHECKPOINT_FILE" ]]; then
+  echo "Resuming — completed steps: $(tr '\n' ', ' < "$CHECKPOINT_FILE")"
+  echo ""
+else
+  # Fresh run — clear any stale checkpoint
+  rm -f "$CHECKPOINT_FILE"
+fi
+# ─────────────────────────────────────────────────────────────────────────────
+
+# ─── Progress helpers ────────────────────────────────────────────────────────
+TOTAL_STEPS=8
+_STEP=0
+_SUITE_START=$(date +%s)
+
+progress() {
+  _STEP=$((_STEP + 1))
+  local elapsed=$(( $(date +%s) - _SUITE_START ))
+  local mins=$(( elapsed / 60 ))
+  local secs=$(( elapsed % 60 ))
+  log "$(printf '[%d/%d] (%dm%02ds elapsed) %s' "$_STEP" "$TOTAL_STEPS" "$mins" "$secs" "$1")"
+}
+# ─────────────────────────────────────────────────────────────────────────────
+
+log "============================================"
+log "  Kafka vs NATS JetStream Benchmark Suite"
+log "  Started: $(date -Iseconds)"
+log "  CPUs: ${BENCH_CPUS} | RAM: ${BENCH_MEMORY} | UI: ${COMPOSE_PROFILES:-off}"
+log "  Duration: ${TEST_DURATION_SEC}s | Reps: ${REPS} | Producers: ${NUM_PRODUCERS} | Throughput: UNCAPPED"
+log "  Results:  ${RESULTS_DIR}"
+log "============================================"
 echo ""
 
 # Start background metrics collector
 "$PROJECT_ROOT/scripts/metrics_collector.sh" &
 METRICS_PID=$!
 trap "kill $METRICS_PID 2>/dev/null || true; echo 'Metrics collector stopped.'" EXIT
-echo "Metrics collector running (PID $METRICS_PID)"
+log "Metrics collector running (PID $METRICS_PID)"
 echo ""
 
 # --- Scenario A: Idle footprint (AC-3) ---
-echo ">>> SCENARIO A: Idle footprint"
-bash "$PROJECT_ROOT/scripts/bench_idle.sh"
+if step_done "idle"; then
+  progress "Idle footprint [SKIPPED]"
+else
+  progress "Idle footprint"
+  bash "$PROJECT_ROOT/scripts/bench_idle.sh"
+  log "Idle footprint complete"
+  mark_done "idle"
+fi
 echo ""
 
 # --- Scenario B: Startup & recovery (AC-4) ---
-echo ">>> SCENARIO B: Startup & Recovery"
-bash "$PROJECT_ROOT/scripts/bench_startup.sh"
+if step_done "startup"; then
+  progress "Startup & Recovery [SKIPPED]"
+else
+  progress "Startup & Recovery"
+  bash "$PROJECT_ROOT/scripts/bench_startup.sh"
+  log "Startup & Recovery complete"
+  mark_done "startup"
+fi
 echo ""
 
 # --- Scenario C: Baseline throughput (AC-5) ---
-echo ">>> SCENARIO C: Baseline Throughput"
-bash "$PROJECT_ROOT/scripts/bench_throughput.sh"
+if step_done "throughput"; then
+  progress "Baseline Throughput [SKIPPED]"
+else
+  progress "Baseline Throughput"
+  bash "$PROJECT_ROOT/scripts/bench_throughput.sh"
+  log "Baseline Throughput complete"
+  mark_done "throughput"
+fi
 echo ""
 
 # --- Scenario D: Latency under load (AC-6) ---
-echo ">>> SCENARIO D: Latency Under Load"
-bash "$PROJECT_ROOT/scripts/bench_latency.sh"
+if step_done "latency"; then
+  progress "Latency Under Load [SKIPPED]"
+else
+  progress "Latency Under Load"
+  bash "$PROJECT_ROOT/scripts/bench_latency.sh"
+  log "Latency Under Load complete"
+  mark_done "latency"
+fi
 echo ""
 
 # --- Scenario F: Memory stress (AC-7) ---
-echo ">>> SCENARIO F: Memory Stress"
-bash "$PROJECT_ROOT/scripts/bench_memory_stress.sh"
+if step_done "memory_stress"; then
+  progress "Memory Stress [SKIPPED]"
+else
+  progress "Memory Stress"
+  bash "$PROJECT_ROOT/scripts/bench_memory_stress.sh"
+  log "Memory Stress complete"
+  mark_done "memory_stress"
+fi
+echo ""
+
+# --- Scenario G: CLI-native throughput ---
+if step_done "cli_throughput"; then
+  progress "CLI-Native Throughput [SKIPPED]"
+else
+  progress "CLI-Native Throughput"
+  bash "$PROJECT_ROOT/scripts/bench_cli_throughput.sh"
+  log "CLI-Native Throughput complete"
+  mark_done "cli_throughput"
+fi
 echo ""
 
 # --- Aggregate results (AC-8, AC-9) ---
-echo ">>> AGGREGATING RESULTS"
+progress "Aggregating Results"
 uv run python3 "$PROJECT_ROOT/bench/aggregate_results.py"
 echo ""
 
-echo "============================================"
-echo "  Benchmark complete: $(date -Iseconds)"
-echo "  Results in: $PROJECT_ROOT/results/"
-echo "============================================"
+# --- Generate charts ---
+progress "Generating Charts"
+uv run python3 "$PROJECT_ROOT/bench/visualize.py"
+echo ""
+
+log "============================================"
+log "  Benchmark complete: $(date -Iseconds)"
+log "  Results in: $RESULTS_DIR/"
+log "  Full log:  $LOG_FILE"
+log "============================================"

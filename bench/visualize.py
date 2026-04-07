@@ -1,20 +1,32 @@
 #!/usr/bin/env python3
-"""Visualize benchmark results — generates PNG charts from results/*.json."""
+"""Visualize benchmark results — generates PNG charts from results/*.json.
+
+Single-scenario mode (default):
+    uv run python3 bench/visualize.py
+    RESULTS_DIR=results/large uv run python3 bench/visualize.py
+
+Cross-scenario comparison mode:
+    SCENARIO_NAMES="large medium small" uv run python3 bench/visualize.py --compare
+"""
 
 import json
+import os
 import sys
 from pathlib import Path
 
 import matplotlib.pyplot as plt
 import numpy as np
+from matplotlib.gridspec import GridSpec
 
-RESULTS = Path(__file__).resolve().parent.parent / "results"
+_project_root = Path(__file__).resolve().parent.parent
+RESULTS = Path(os.environ.get("RESULTS_DIR", str(_project_root / "results")))
 CHARTS = RESULTS / "charts"
 
 KAFKA_COLOR = "#E04E39"
 NATS_COLOR = "#27AAE1"
 BROKERS = ["kafka", "nats"]
 COLORS = {"kafka": KAFKA_COLOR, "nats": NATS_COLOR}
+SCENARIO_COLORS = {"large": "#4CAF50", "medium": "#FF9800", "small": "#F44336"}
 
 
 def load(name):
@@ -428,10 +440,454 @@ def chart_scorecard():
     print("  -> 06_scorecard.png")
 
 
+# ── Cross-Scenario Comparison Charts ──────────────────────────────────
+
+
+def _load_scenario(scenario_name, filename):
+    """Load a JSON file from a specific scenario's results dir."""
+    p = _project_root / "results" / scenario_name / filename
+    if not p.exists():
+        return None
+    try:
+        return json.loads(p.read_text())
+    except json.JSONDecodeError:
+        return None
+
+
+def _load_scenario_jsonl(scenario_name, filename):
+    p = _project_root / "results" / scenario_name / filename
+    if not p.exists():
+        return []
+    entries = []
+    for line in p.read_text().strip().splitlines():
+        try:
+            entries.append(json.loads(line))
+        except json.JSONDecodeError:
+            pass
+    return entries
+
+
+def compare_idle(scenarios, out_dir):
+    """Grouped bar: idle RAM for Kafka vs NATS across scenarios."""
+    data = {}
+    for sc in scenarios:
+        data[sc] = {}
+        for b in BROKERS:
+            d = _load_scenario(sc, f"{b}_idle_stats.json")
+            if d:
+                mem_str = d.get("mem_usage", "0MiB / 0GiB")
+                used = mem_str.split("/")[0].strip()
+                if "GiB" in used:
+                    mb = float(used.replace("GiB", "").strip()) * 1024
+                elif "MiB" in used:
+                    mb = float(used.replace("MiB", "").strip())
+                elif "KiB" in used:
+                    mb = float(used.replace("KiB", "").strip()) / 1024
+                else:
+                    mb = 0
+                data[sc][b] = mb
+
+    if not any(data[sc] for sc in scenarios):
+        return
+
+    fig, ax = plt.subplots(figsize=(10, 5))
+    fig.suptitle("Idle RAM — Cross-Scenario Comparison", fontweight="bold")
+
+    x = np.arange(len(scenarios))
+    w = 0.3
+    for i, b in enumerate(BROKERS):
+        vals = [data[sc].get(b, 0) for sc in scenarios]
+        offset = (i - 0.5) * w
+        bars = ax.bar(x + offset, vals, w, label=b.upper(), color=COLORS[b])
+        for bar, v in zip(bars, vals):
+            if v > 0:
+                ax.text(
+                    bar.get_x() + bar.get_width() / 2,
+                    bar.get_height(),
+                    f"{v:.0f}",
+                    ha="center",
+                    va="bottom",
+                    fontsize=9,
+                    fontweight="bold",
+                )
+
+    ax.set_ylabel("RAM (MiB)")
+    ax.set_xticks(x)
+    ax.set_xticklabels([s.upper() for s in scenarios])
+    ax.set_xlabel("Hardware Scenario")
+    ax.legend()
+    plt.tight_layout()
+    fig.savefig(out_dir / "cmp_01_idle.png", bbox_inches="tight")
+    plt.close()
+    print("  -> cmp_01_idle.png")
+
+
+def compare_startup(scenarios, out_dir):
+    """Grouped bar: startup + recovery across scenarios."""
+    data = {}
+    for sc in scenarios:
+        data[sc] = {}
+        for b in BROKERS:
+            entries = _load_scenario_jsonl(sc, f"{b}_startup.json")
+            for e in entries:
+                data[sc][(b, e["type"])] = e["ms"]
+
+    if not any(data[sc] for sc in scenarios):
+        return
+
+    fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+    fig.suptitle("Startup & Recovery — Cross-Scenario Comparison", fontweight="bold")
+
+    for ax, metric, title in zip(
+        axes, ["startup", "recovery"], ["Cold Start (ms)", "SIGKILL Recovery (ms)"]
+    ):
+        x = np.arange(len(scenarios))
+        w = 0.3
+        for i, b in enumerate(BROKERS):
+            vals = [data[sc].get((b, metric), 0) for sc in scenarios]
+            offset = (i - 0.5) * w
+            bars = ax.bar(x + offset, vals, w, label=b.upper(), color=COLORS[b])
+            for bar, v in zip(bars, vals):
+                if v > 0:
+                    ax.text(
+                        bar.get_x() + bar.get_width() / 2,
+                        bar.get_height(),
+                        f"{v:.0f}",
+                        ha="center",
+                        va="bottom",
+                        fontsize=8,
+                        fontweight="bold",
+                    )
+        ax.set_ylabel("Time (ms)")
+        ax.set_title(title)
+        ax.set_xticks(x)
+        ax.set_xticklabels([s.upper() for s in scenarios])
+        ax.legend()
+
+    plt.tight_layout()
+    fig.savefig(out_dir / "cmp_02_startup.png", bbox_inches="tight")
+    plt.close()
+    print("  -> cmp_02_startup.png")
+
+
+def compare_throughput(scenarios, out_dir):
+    """Grouped bar: median throughput (Python client) across scenarios."""
+    data = {}
+    for sc in scenarios:
+        data[sc] = {}
+        for b in BROKERS:
+            rates = []
+            for i in range(1, 4):
+                d = _load_scenario(sc, f"{b}_throughput_run{i}.json")
+                if d and "aggregate_rate" in d:
+                    rates.append(d["aggregate_rate"])
+            if rates:
+                data[sc][b] = sorted(rates)[len(rates) // 2]
+
+    if not any(data[sc] for sc in scenarios):
+        return
+
+    fig, ax = plt.subplots(figsize=(10, 5))
+    fig.suptitle(
+        "Sustained Throughput — Cross-Scenario Comparison (Python Client)",
+        fontweight="bold",
+    )
+
+    x = np.arange(len(scenarios))
+    w = 0.3
+    for i, b in enumerate(BROKERS):
+        vals = [data[sc].get(b, 0) for sc in scenarios]
+        offset = (i - 0.5) * w
+        bars = ax.bar(x + offset, vals, w, label=b.upper(), color=COLORS[b])
+        for bar, v in zip(bars, vals):
+            if v > 0:
+                ax.text(
+                    bar.get_x() + bar.get_width() / 2,
+                    bar.get_height(),
+                    f"{v:,.0f}",
+                    ha="center",
+                    va="bottom",
+                    fontsize=9,
+                    fontweight="bold",
+                )
+
+    ax.set_ylabel("Messages / sec")
+    ax.set_xticks(x)
+    ax.set_xticklabels([s.upper() for s in scenarios])
+    ax.set_xlabel("Hardware Scenario")
+    ax.legend()
+    plt.tight_layout()
+    fig.savefig(out_dir / "cmp_03_throughput.png", bbox_inches="tight")
+    plt.close()
+    print("  -> cmp_03_throughput.png")
+
+
+def compare_cli_throughput(scenarios, out_dir):
+    """Grouped bar: CLI-native throughput across scenarios."""
+    data = {}
+    for sc in scenarios:
+        data[sc] = {}
+        for b in BROKERS:
+            d = _load_scenario(sc, f"{b}_cli_throughput.json")
+            if d and "msgs_per_sec" in d:
+                data[sc][b] = d["msgs_per_sec"]
+
+    if not any(data[sc] for sc in scenarios):
+        return
+
+    fig, ax = plt.subplots(figsize=(10, 5))
+    fig.suptitle("CLI-Native Throughput — Cross-Scenario Comparison", fontweight="bold")
+
+    x = np.arange(len(scenarios))
+    w = 0.3
+    for i, b in enumerate(BROKERS):
+        vals = [data[sc].get(b, 0) for sc in scenarios]
+        offset = (i - 0.5) * w
+        bars = ax.bar(x + offset, vals, w, label=b.upper(), color=COLORS[b])
+        for bar, v in zip(bars, vals):
+            if v > 0:
+                ax.text(
+                    bar.get_x() + bar.get_width() / 2,
+                    bar.get_height(),
+                    f"{v:,.0f}",
+                    ha="center",
+                    va="bottom",
+                    fontsize=9,
+                    fontweight="bold",
+                )
+
+    ax.set_ylabel("Messages / sec")
+    ax.set_xticks(x)
+    ax.set_xticklabels([s.upper() for s in scenarios])
+    ax.set_xlabel("Hardware Scenario")
+    ax.legend()
+    plt.tight_layout()
+    fig.savefig(out_dir / "cmp_04_cli_throughput.png", bbox_inches="tight")
+    plt.close()
+    print("  -> cmp_04_cli_throughput.png")
+
+
+def compare_latency(scenarios, out_dir):
+    """Grouped bar: p99 latency across scenarios for each broker."""
+    data = {}
+    for sc in scenarios:
+        data[sc] = {}
+        for b in BROKERS:
+            d = _load_scenario(sc, f"{b}_latency.json")
+            if d:
+                data[sc][b] = d
+
+    if not any(data[sc] for sc in scenarios):
+        return
+
+    percentiles = ["p50_us", "p95_us", "p99_us"]
+    labels = ["p50", "p95", "p99"]
+
+    fig, axes = plt.subplots(1, len(BROKERS), figsize=(14, 5), sharey=True)
+    fig.suptitle("Latency Percentiles — Cross-Scenario Comparison", fontweight="bold")
+
+    for ax, b in zip(axes, BROKERS):
+        x = np.arange(len(percentiles))
+        w = 0.8 / len(scenarios)
+        for j, sc in enumerate(scenarios):
+            vals = [data[sc].get(b, {}).get(p, 0) for p in percentiles]
+            offset = (j - (len(scenarios) - 1) / 2) * w
+            bars = ax.bar(
+                x + offset,
+                vals,
+                w,
+                label=sc.upper(),
+                color=SCENARIO_COLORS.get(sc, "#888"),
+            )
+            for bar, v in zip(bars, vals):
+                if v > 0:
+                    ax.text(
+                        bar.get_x() + bar.get_width() / 2,
+                        bar.get_height(),
+                        f"{v:,.0f}",
+                        ha="center",
+                        va="bottom",
+                        fontsize=7,
+                        fontweight="bold",
+                    )
+        ax.set_title(b.upper(), fontweight="bold")
+        ax.set_xticks(x)
+        ax.set_xticklabels(labels)
+        ax.set_ylabel("Latency (µs)" if b == BROKERS[0] else "")
+        ax.set_yscale("log")
+        ax.legend(fontsize=8)
+        ax.grid(axis="y", alpha=0.3)
+
+    plt.tight_layout()
+    fig.savefig(out_dir / "cmp_05_latency.png", bbox_inches="tight")
+    plt.close()
+    print("  -> cmp_05_latency.png")
+
+
+def compare_memory_stress(scenarios, out_dir):
+    """Heatmap table: pass/fail across scenarios and memory levels."""
+    levels = ["4g", "2g", "1g", "512m"]
+    data = {}
+    for sc in scenarios:
+        data[sc] = {}
+        for b in BROKERS:
+            for mem in levels:
+                d = _load_scenario(sc, f"{b}_mem_{mem}.json")
+                if d:
+                    data[sc][(b, mem)] = d.get("status", "UNKNOWN")
+
+    if not any(data[sc] for sc in scenarios):
+        return
+
+    fig, ax = plt.subplots(figsize=(12, 4))
+    fig.suptitle("Memory Stress Results — Cross-Scenario", fontweight="bold")
+
+    # Build table: rows = (scenario, broker), cols = memory levels
+    row_labels = []
+    cell_text = []
+    cell_colors = []
+    for sc in scenarios:
+        for b in BROKERS:
+            row_labels.append(f"{sc.upper()} / {b.upper()}")
+            row = []
+            row_c = []
+            for mem in levels:
+                status = data[sc].get((b, mem), "N/A")
+                row.append(status)
+                if status == "PASS":
+                    row_c.append(COLORS[b])
+                elif "FAIL" in status:
+                    row_c.append("#663333")
+                else:
+                    row_c.append("#444")
+            cell_text.append(row)
+            cell_colors.append(row_c)
+
+    ax.axis("off")
+    table = ax.table(
+        cellText=cell_text,
+        rowLabels=row_labels,
+        colLabels=levels,
+        loc="center",
+        cellLoc="center",
+    )
+    table.auto_set_font_size(False)
+    table.set_fontsize(10)
+    table.scale(1.2, 1.8)
+
+    for (row, col), cell in table.get_celld().items():
+        cell.set_edgecolor("#555")
+        if row == 0:
+            cell.set_facecolor("#444")
+            cell.set_text_props(fontweight="bold", color="#ccc")
+        elif col == -1:
+            cell.set_facecolor("#333")
+            cell.set_text_props(color="#ccc")
+        else:
+            cell.set_facecolor(cell_colors[row - 1][col])
+            cell.set_text_props(color="#fff", fontweight="bold")
+
+    plt.tight_layout()
+    fig.savefig(out_dir / "cmp_06_memory_stress.png", bbox_inches="tight")
+    plt.close()
+    print("  -> cmp_06_memory_stress.png")
+
+
+def create_mega_image(scenarios, out_dir):
+    """Combine all comparison PNGs into a single mega-image."""
+    from PIL import Image
+
+    chart_files = sorted(out_dir.glob("cmp_*.png"))
+    if not chart_files:
+        print("  No comparison charts found for mega-image.")
+        return
+
+    images = [Image.open(f) for f in chart_files]
+
+    # Also include per-scenario scorecards if they exist
+    for sc in scenarios:
+        sc_scorecard = _project_root / "results" / sc / "charts" / "06_scorecard.png"
+        if sc_scorecard.exists():
+            images.append(Image.open(sc_scorecard))
+
+    # Layout: 2 columns
+    cols = 2
+    rows = (len(images) + cols - 1) // cols
+
+    # Scale all images to the same width
+    target_w = max(img.width for img in images)
+    scaled = []
+    for img in images:
+        ratio = target_w / img.width
+        new_h = int(img.height * ratio)
+        scaled.append(img.resize((target_w, new_h), Image.LANCZOS))
+
+    # Compute row heights (max in each row pair)
+    row_heights = []
+    for r in range(rows):
+        h = 0
+        for c in range(cols):
+            idx = r * cols + c
+            if idx < len(scaled):
+                h = max(h, scaled[idx].height)
+        row_heights.append(h)
+
+    padding = 20
+    total_w = cols * target_w + (cols + 1) * padding
+    total_h = sum(row_heights) + (rows + 1) * padding
+
+    mega = Image.new("RGB", (total_w, total_h), color=(30, 30, 30))
+
+    y_offset = padding
+    for r in range(rows):
+        x_offset = padding
+        for c in range(cols):
+            idx = r * cols + c
+            if idx < len(scaled):
+                mega.paste(scaled[idx], (x_offset, y_offset))
+            x_offset += target_w + padding
+        y_offset += row_heights[r] + padding
+
+    out_path = out_dir / "mega_comparison.png"
+    mega.save(out_path, optimize=True)
+    print(f"  -> mega_comparison.png ({total_w}x{total_h})")
+
+    # Cleanup
+    for img in images:
+        img.close()
+
+
+def run_compare(scenarios):
+    """Generate cross-scenario comparison charts."""
+    out_dir = _project_root / "results" / "comparison"
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    print(
+        f"Generating cross-scenario charts for: {', '.join(s.upper() for s in scenarios)}"
+    )
+
+    compare_idle(scenarios, out_dir)
+    compare_startup(scenarios, out_dir)
+    compare_throughput(scenarios, out_dir)
+    compare_cli_throughput(scenarios, out_dir)
+    compare_latency(scenarios, out_dir)
+    compare_memory_stress(scenarios, out_dir)
+    create_mega_image(scenarios, out_dir)
+
+    print(f"\nComparison charts saved to {out_dir}/")
+
+
 # ── Main ──────────────────────────────────────────────────────────────
 
 
 def main():
+    if "--compare" in sys.argv:
+        setup_style()
+        names_str = os.environ.get("SCENARIO_NAMES", "large medium small")
+        scenarios = names_str.split()
+        run_compare(scenarios)
+        return
+
     if not RESULTS.exists():
         print(f"No results directory at {RESULTS}", file=sys.stderr)
         sys.exit(1)

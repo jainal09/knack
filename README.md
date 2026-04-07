@@ -35,6 +35,32 @@ docker compose -f infra/docker-compose.nats.yml down -v
 uv sync
 ```
 
+## Run multi-scenario benchmarks
+
+Run the full suite across multiple hardware configurations (large / medium / small):
+
+```bash
+./run_scenarios.sh                          # all 3 scenarios
+./run_scenarios.sh --scenario large         # single scenario
+./run_scenarios.sh --scenario small --quick # quick smoke run on small hardware
+./run_scenarios.sh --list                   # show scenario configs
+```
+
+| Scenario | CPUs | Memory |
+|----------|------|--------|
+| large    | 4.0  | 8 GB   |
+| medium   | 3.0  | 4 GB   |
+| small    | 2.0  | 2 GB   |
+
+Per-scenario results go to `results/{large,medium,small}/`. Cross-scenario comparison charts
+and a combined mega-image are generated automatically in `results/comparison/`.
+
+You can also regenerate comparison charts manually:
+
+```bash
+SCENARIO_NAMES="large medium small" uv run python3 bench/visualize.py --compare
+```
+
 ## Run full benchmark suite
 
 ```bash
@@ -65,6 +91,9 @@ bash scripts/bench_latency.sh
 
 # AC-7: Memory stress — 4 levels × 2 min × 2 brokers (~20 min)
 bash scripts/bench_memory_stress.sh
+
+# CLI-native throughput — official tools, no Python overhead (~5 min)
+bash scripts/bench_cli_throughput.sh
 ```
 
 ## Generate charts
@@ -87,20 +116,30 @@ Writes `results/full_report.json` and prints the recommendation.
 
 ```text
 results/
-├── *_idle_stats.json             # idle RAM/CPU/disk
-├── *_startup.json                # startup + recovery ms
-├── *_throughput_run{1,2,3}.json  # per-run throughput
-├── *_latency.json                # p50/p95/p99/p999/max
-├── *_mem_{4g,2g,1g,512m}.json   # memory stress pass/fail
-├── docker_stats.csv              # time-series resource usage
-├── full_report.json              # aggregated report + recommendation
+├── large/ medium/ small/           # per-scenario results (when using run_scenarios.sh)
+│   ├── *_idle_stats.json
+│   ├── *_startup.json
+│   ├── *_throughput_run{1,2,3}.json
+│   ├── *_latency.json
+│   ├── *_mem_{4g,2g,1g,512m}.json
+│   ├── *_cli_throughput.json
+│   ├── docker_stats.csv
+│   ├── full_report.json
+│   └── charts/
+│       ├── 01_idle_footprint.png … 06_scorecard.png
+├── comparison/                     # cross-scenario charts
+│   ├── cmp_01_idle.png
+│   ├── cmp_02_startup.png
+│   ├── cmp_03_throughput.png
+│   ├── cmp_04_cli_throughput.png
+│   ├── cmp_05_latency.png
+│   ├── cmp_06_memory_stress.png
+│   └── mega_comparison.png         # all charts combined in one image
+├── *_idle_stats.json               # single-scenario results (when using run_all.sh directly)
+├── …
+├── full_report.json
 └── charts/
-    ├── 01_idle_footprint.png
-    ├── 02_startup_recovery.png
-    ├── 03_throughput.png
-    ├── 04_latency.png
-    ├── 05_memory_stress.png
-    └── 06_scorecard.png
+    ├── 01_idle_footprint.png … 06_scorecard.png
 ```
 
 ## Tweak parameters

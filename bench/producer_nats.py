@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""NATS JetStream producer — sustained throughput benchmark.
+"""NATS JetStream producer — max throughput benchmark.
 
-Runs NUM_PRODUCERS concurrent producer tasks at BASELINE_RATE (per-producer)
-for TEST_DURATION_SEC seconds with sync flush (durability parity with Kafka acks=all).
+Runs NUM_PRODUCERS concurrent producer tasks for TEST_DURATION_SEC seconds.
+No artificial rate cap — the broker’s resource limits are the only throttle.
+Uses asyncio with semaphore-bounded concurrency.
 """
 
 import asyncio
@@ -26,7 +27,6 @@ def _cfg(key):
 NATS_URL = _cfg("NATS_URL")
 STREAM = _cfg("NATS_STREAM")
 SUBJECT = _cfg("NATS_SUBJECT")
-RATE = int(_cfg("BASELINE_RATE"))
 DURATION = int(_cfg("TEST_DURATION_SEC"))
 PAYLOAD = b"x" * int(_cfg("PAYLOAD_BYTES"))
 NUM_PROD = int(_cfg("NUM_PRODUCERS"))
@@ -44,22 +44,28 @@ async def ensure_stream(js):
             max_bytes=10 * 1024 * 1024 * 1024,  # 10 GB
             storage="file",
         )
-        print(f"Created stream {STREAM}")
+        print(f"Created stream {STREAM}", file=sys.stderr)
     except nats.js.errors.BadRequestError:
-        print(f"Stream {STREAM} already exists")
+        print(f"Stream {STREAM} already exists", file=sys.stderr)
     except Exception as e:
         print(f"Warning creating stream: {e}", file=sys.stderr)
 
 
+# Limit concurrent in-flight publishes per worker to avoid overwhelming the connection
+MAX_INFLIGHT = 256
+BATCH_SIZE = 500  # fire this many tasks per tight loop before yielding
+
+
 async def producer_worker(worker_id, js):
-    """Single producer coroutine: publishes RATE msgs/sec for DURATION seconds."""
+    """Single producer coroutine: publishes as fast as possible for DURATION seconds."""
     sent = 0
     errors = 0
+    sem = asyncio.Semaphore(MAX_INFLIGHT)
     t0 = time.monotonic()
 
-    while time.monotonic() - t0 < DURATION:
-        batch_start = time.monotonic()
-        for _ in range(RATE):
+    async def _pub():
+        nonlocal sent, errors
+        async with sem:
             try:
                 await js.publish(SUBJECT, PAYLOAD)
                 sent += 1
@@ -67,9 +73,10 @@ async def producer_worker(worker_id, js):
                 errors += 1
                 if errors <= 5:
                     print(f"Worker {worker_id} publish error: {e}", file=sys.stderr)
-        elapsed = time.monotonic() - batch_start
-        if elapsed < 1.0:
-            await asyncio.sleep(1.0 - elapsed)
+
+    while time.monotonic() - t0 < DURATION:
+        tasks = [asyncio.create_task(_pub()) for _ in range(BATCH_SIZE)]
+        await asyncio.gather(*tasks)
 
     wall = time.monotonic() - t0
     results.append(
@@ -101,8 +108,7 @@ async def main():
     output = {
         "broker": "nats",
         "num_producers": NUM_PROD,
-        "target_rate_per_producer": RATE,
-        "payload_bytes": int(_env["PAYLOAD_BYTES"]),
+        "payload_bytes": int(_cfg("PAYLOAD_BYTES")),
         "duration_sec": DURATION,
         "total_sent": total_sent,
         "total_errors": total_errors,
