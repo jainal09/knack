@@ -129,6 +129,17 @@ else
 fi
 # ─────────────────────────────────────────────────────────────────────────────
 
+# ─── Colors (also available via _log.sh in child scripts) ────────────────────
+_RST='\033[0m'
+_BOLD='\033[1m'
+_DIM='\033[2m'
+_RED='\033[1;31m'
+_GREEN='\033[1;32m'
+_YELLOW='\033[1;33m'
+_CYAN='\033[1;36m'
+_BLUE='\033[1;34m'
+_MAG='\033[1;35m'
+
 # ─── Progress helpers ────────────────────────────────────────────────────────
 TOTAL_STEPS=8
 _STEP=0
@@ -139,17 +150,18 @@ progress() {
   local elapsed=$(( $(date +%s) - _SUITE_START ))
   local mins=$(( elapsed / 60 ))
   local secs=$(( elapsed % 60 ))
-  log "$(printf '[%d/%d] (%dm%02ds elapsed) %s' "$_STEP" "$TOTAL_STEPS" "$mins" "$secs" "$1")"
+  printf "\n${_CYAN}[%s] ► [%d/%d]${_RST} ${_DIM}(%dm%02ds elapsed)${_RST} ${_BOLD}%s${_RST}\n" \
+    "$(date '+%Y-%m-%d %H:%M:%S')" "$_STEP" "$TOTAL_STEPS" "$mins" "$secs" "$1"
 }
 # ─────────────────────────────────────────────────────────────────────────────
 
-log "============================================"
-log "  Kafka vs NATS JetStream Benchmark Suite"
-log "  Started: $(date -Iseconds)"
-log "  CPUs: ${BENCH_CPUS} | RAM: ${BENCH_MEMORY} | UI: ${COMPOSE_PROFILES:-off}"
-log "  Duration: ${TEST_DURATION_SEC}s | Reps: ${REPS} | Producers: ${NUM_PRODUCERS} | Throughput: UNCAPPED"
-log "  Results:  ${RESULTS_DIR}"
-log "============================================"
+printf "${_MAG}============================================${_RST}\n"
+printf "${_MAG}  Kafka vs NATS JetStream Benchmark Suite${_RST}\n"
+printf "${_MAG}  Started: $(date -Iseconds)${_RST}\n"
+printf "${_BLUE}  CPUs: ${BENCH_CPUS} | RAM: ${BENCH_MEMORY} | UI: ${COMPOSE_PROFILES:-off}${_RST}\n"
+printf "${_BLUE}  Duration: ${TEST_DURATION_SEC}s | Reps: ${REPS} | Producers: ${NUM_PRODUCERS} | Throughput: UNCAPPED${_RST}\n"
+printf "${_BLUE}  Results:  ${RESULTS_DIR}${_RST}\n"
+printf "${_MAG}============================================${_RST}\n"
 echo ""
 
 # Start background metrics collector
@@ -165,7 +177,7 @@ if step_done "idle"; then
 else
   progress "Idle footprint"
   bash "$PROJECT_ROOT/scripts/bench_idle.sh"
-  log "Idle footprint complete"
+  printf "${_GREEN}[%s] ✔ Idle footprint complete${_RST}\n" "$(date '+%Y-%m-%d %H:%M:%S')"
   mark_done "idle"
 fi
 echo ""
@@ -176,7 +188,7 @@ if step_done "startup"; then
 else
   progress "Startup & Recovery"
   bash "$PROJECT_ROOT/scripts/bench_startup.sh"
-  log "Startup & Recovery complete"
+  printf "${_GREEN}[%s] ✔ Startup & Recovery complete${_RST}\n" "$(date '+%Y-%m-%d %H:%M:%S')"
   mark_done "startup"
 fi
 echo ""
@@ -187,7 +199,7 @@ if step_done "throughput"; then
 else
   progress "Baseline Throughput"
   bash "$PROJECT_ROOT/scripts/bench_throughput.sh"
-  log "Baseline Throughput complete"
+  printf "${_GREEN}[%s] ✔ Baseline Throughput complete${_RST}\n" "$(date '+%Y-%m-%d %H:%M:%S')"
   mark_done "throughput"
 fi
 echo ""
@@ -198,7 +210,7 @@ if step_done "latency"; then
 else
   progress "Latency Under Load"
   bash "$PROJECT_ROOT/scripts/bench_latency.sh"
-  log "Latency Under Load complete"
+  printf "${_GREEN}[%s] ✔ Latency Under Load complete${_RST}\n" "$(date '+%Y-%m-%d %H:%M:%S')"
   mark_done "latency"
 fi
 echo ""
@@ -209,7 +221,7 @@ if step_done "memory_stress"; then
 else
   progress "Memory Stress"
   bash "$PROJECT_ROOT/scripts/bench_memory_stress.sh"
-  log "Memory Stress complete"
+  printf "${_GREEN}[%s] ✔ Memory Stress complete${_RST}\n" "$(date '+%Y-%m-%d %H:%M:%S')"
   mark_done "memory_stress"
 fi
 echo ""
@@ -220,7 +232,7 @@ if step_done "cli_throughput"; then
 else
   progress "CLI-Native Throughput"
   bash "$PROJECT_ROOT/scripts/bench_cli_throughput.sh"
-  log "CLI-Native Throughput complete"
+  printf "${_GREEN}[%s] ✔ CLI-Native Throughput complete${_RST}\n" "$(date '+%Y-%m-%d %H:%M:%S')"
   mark_done "cli_throughput"
 fi
 echo ""
@@ -235,8 +247,8 @@ progress "Generating Charts"
 uv run python3 "$PROJECT_ROOT/bench/visualize.py"
 echo ""
 
-log "============================================"
-log "  Benchmark complete: $(date -Iseconds)"
-log "  Results in: $RESULTS_DIR/"
-log "  Full log:  $LOG_FILE"
-log "============================================"
+printf "\n${_GREEN}============================================${_RST}\n"
+printf "${_GREEN}  Benchmark complete: $(date -Iseconds)${_RST}\n"
+printf "${_GREEN}  Results in: $RESULTS_DIR/${_RST}\n"
+printf "${_GREEN}  Full log:  $LOG_FILE${_RST}\n"
+printf "${_GREEN}============================================${_RST}\n"

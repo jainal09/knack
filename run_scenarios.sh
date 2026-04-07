@@ -101,28 +101,38 @@ mkdir -p "$MASTER_RESULTS_DIR"
 MASTER_LOG="$MASTER_RESULTS_DIR/scenarios_$(date +%Y%m%d_%H%M%S).log"
 exec > >(tee -a "$MASTER_LOG") 2>&1
 
+# ─── Colors ──────────────────────────────────────────────────────────────────
+_RST='\033[0m'
+_BOLD='\033[1m'
+_DIM='\033[2m'
+_RED='\033[1;31m'
+_GREEN='\033[1;32m'
+_YELLOW='\033[1;33m'
+_CYAN='\033[1;36m'
+_BLUE='\033[1;34m'
+_MAG='\033[1;35m'
+
 log() {
-  printf '[%s] %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*"
+  printf "${_DIM}[%s]${_RST} %s\n" "$(date '+%Y-%m-%d %H:%M:%S')" "$*"
 }
 
 log "Master log: $MASTER_LOG"
 # ─────────────────────────────────────────────────────────────────────────────
 
 # ─── Run each scenario ───────────────────────────────────────────────────────
-log "============================================================"
-log "  Multi-Scenario Benchmark Runner"
-log "  Scenarios: $(printf '%s ' "${ACTIVE_SCENARIOS[@]}" | sed 's/  */ /g')"
-log "  Started: $(date -Iseconds)"
-log "============================================================"
+printf "${_MAG}============================================================${_RST}\n"
+printf "${_MAG}  Multi-Scenario Benchmark Runner${_RST}\n"
+printf "${_BLUE}  Scenarios: $(printf '%s ' "${ACTIVE_SCENARIOS[@]}" | sed 's/  */ /g')${_RST}\n"
+printf "${_BLUE}  Started: $(date -Iseconds)${_RST}\n"
+printf "${_MAG}============================================================${_RST}\n"
 echo ""
 
 for s in "${ACTIVE_SCENARIOS[@]}"; do
   read -r name cpus mem <<< "$s"
 
-  log ""
-  log "╔══════════════════════════════════════════════════════════╗"
-  log "║  SCENARIO: ${name^^} (${cpus} CPUs, ${mem} RAM)"
-  log "╚══════════════════════════════════════════════════════════╝"
+  printf "\n${_CYAN}╔══════════════════════════════════════════════════════════╗${_RST}\n"
+  printf "${_CYAN}║  SCENARIO: ${name^^} (${cpus} CPUs, ${mem} RAM)${_RST}\n"
+  printf "${_CYAN}╚══════════════════════════════════════════════════════════╝${_RST}\n"
   echo ""
 
   # Set scenario-specific env vars
@@ -133,12 +143,12 @@ for s in "${ACTIVE_SCENARIOS[@]}"; do
   mkdir -p "$RESULTS_DIR"
 
   # Run the full benchmark suite with forwarded args
-  bash "$PROJECT_ROOT/run_all.sh" "${FORWARD_ARGS[@]}" || {
-    log "WARNING: Scenario '${name}' failed. Continuing..."
-  }
+  if bash "$PROJECT_ROOT/run_all.sh" "${FORWARD_ARGS[@]}"; then
+    printf "${_GREEN}[%s] ✔ Scenario '${name}' PASSED. Results in results/${name}/${_RST}\n" "$(date '+%Y-%m-%d %H:%M:%S')"
+  else
+    printf "${_RED}[%s] ✘ Scenario '${name}' FAILED (exit code $?). Partial results in results/${name}/${_RST}\n" "$(date '+%Y-%m-%d %H:%M:%S')"
+  fi
 
-  log ""
-  log ">>> Scenario '${name}' complete. Results in results/${name}/"
   echo ""
 done
 
@@ -153,8 +163,8 @@ export SCENARIO_NAMES
 uv run python3 "$PROJECT_ROOT/bench/visualize.py" --compare
 
 echo ""
-log "============================================================"
-log "  All scenarios complete: $(date -Iseconds)"
-log "  Results in: $PROJECT_ROOT/results/"
-log "  Master log: $MASTER_LOG"
-log "============================================================"
+printf "\n${_GREEN}============================================================${_RST}\n"
+printf "${_GREEN}  All scenarios complete: $(date -Iseconds)${_RST}\n"
+printf "${_GREEN}  Results in: $PROJECT_ROOT/results/${_RST}\n"
+printf "${_GREEN}  Master log: $MASTER_LOG${_RST}\n"
+printf "${_GREEN}============================================================${_RST}\n"

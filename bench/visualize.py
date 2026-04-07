@@ -16,7 +16,6 @@ from pathlib import Path
 
 import matplotlib.pyplot as plt
 import numpy as np
-from matplotlib.gridspec import GridSpec
 
 _project_root = Path(__file__).resolve().parent.parent
 RESULTS = Path(os.environ.get("RESULTS_DIR", str(_project_root / "results")))

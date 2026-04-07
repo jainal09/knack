@@ -16,7 +16,7 @@ services:
       - nats_data:/data
       - ./nats-server.conf:/etc/nats/nats-server.conf:ro
     healthcheck:
-      test: [ "CMD", "nats-server", "--signal", "ldm=localhost:8222" ]
+      test: [ "CMD", "wget", "--spider", "-q", "http://localhost:8222/healthz" ]
       interval: 5s
       timeout: 5s
       retries: 30
