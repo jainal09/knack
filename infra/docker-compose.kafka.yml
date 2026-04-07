@@ -1,0 +1,61 @@
+services:
+  kafka:
+    image: confluentinc/cp-kafka:7.7.8
+    container_name: bench-kafka
+    deploy:
+      resources:
+        limits:
+          cpus: "${BENCH_CPUS:-2.0}"
+          memory: "${BENCH_MEMORY:-4g}"
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://localhost:9092
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_LOG_DIRS: /var/lib/kafka/data
+      CLUSTER_ID: "benchmark-cluster-0001"
+      # --- durability: acks=all equivalent ---
+      KAFKA_ACKS: "all"
+      KAFKA_MIN_INSYNC_REPLICAS: 1
+      KAFKA_LOG_FLUSH_INTERVAL_MESSAGES: 1
+    ports:
+      - "9092:9092"
+    volumes:
+      - kafka_data:/var/lib/kafka/data
+    healthcheck:
+      test: [ "CMD-SHELL", "kafka-topics --bootstrap-server localhost:9092 --list || exit 1" ]
+      interval: 5s
+      timeout: 10s
+      retries: 30
+
+  redpanda-console:
+    image: redpandadata/console:latest
+    container_name: bench-redpanda-console
+    entrypoint: /bin/sh
+    command: -c "echo \"$$CONSOLE_CONFIG_FILE\" > /tmp/config.yml; /app/console"
+    environment:
+      CONFIG_FILEPATH: /tmp/config.yml
+      CONSOLE_CONFIG_FILE: |
+        kafka:
+          brokers: ["kafka:9092"]
+          startup:
+            maxRetries: 20
+            retryInterval: 15s
+            maxRetryInterval: 180s
+            backoffMultiplier: 2
+    ports:
+      - "9080:8080"
+    profiles:
+      - tools
+    depends_on:
+      kafka:
+        condition: service_healthy
+
+volumes:
+  kafka_data:
