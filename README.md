@@ -66,11 +66,14 @@ and a combined mega-image are generated automatically in `results/comparison/`.
 ./bench_status.sh                        # latest run — auto-detects scenario log
 ./bench_status.sh --all                  # all past runs
 ./bench_status.sh --latest 3             # last 3 runs
+./bench_status.sh --watch                # live watch mode (refresh every 5s, auto-exit on completion)
+./bench_status.sh -w 10                  # watch mode with custom 10s interval
 ./bench_status.sh results/large/benchmark_*.log  # specific log file
 ```
 
 Shows per-scenario status (RUNNING / COMPLETED / INTERRUPTED / FAILED), a step-by-step
 progress checklist, elapsed time, remaining steps, and any errors extracted from the logs.
+Watch mode (`-w` / `--watch`) refreshes automatically and exits when all benchmarks complete.
 
 > **Ctrl+C guard:** Both `run_all.sh` and `run_scenarios.sh` intercept Ctrl+C and prompt
 > `Are you sure you want to cancel? [y/N]` before aborting. Press N or Enter to resume.
@@ -163,9 +166,13 @@ bash scripts/bench_resource_scaling.sh  # Throughput vs CPU limit
 ./bench_report.sh --scenario large medium  # multiple scenarios
 ```
 
-Generates `results/{scenario}/benchmark_report.md` — a self-contained Markdown document with
-every chart image embedded and the underlying data in tables beneath. Timestamped to the run
-so you know exactly which benchmark produced the data.
+Generates `results/{scenario}/benchmark_report.md` for each scenario — a self-contained
+Markdown document with every chart image embedded and the underlying data in tables beneath.
+Timestamped to the run so you know exactly which benchmark produced the data.
+
+When multiple scenarios are processed, also generates a **consolidated report** at
+`results/benchmark_report.md` that combines all scenario reports into a single document
+with a table of contents and correctly rewritten chart paths.
 
 ## Generate charts
 
@@ -256,8 +263,10 @@ results/
 │   ├── full_report.json
 │   ├── checkpoint.log
 │   ├── benchmark_*.log
+│   ├── benchmark_report.md               # per-scenario Markdown report
 │   └── charts/
 │       ├── 01_idle_footprint.png … 20_latency_context.png
+├── benchmark_report.md                   # consolidated report (all scenarios)
 ├── comparison/                           # cross-scenario (auto-generated)
 │   ├── cmp_01_idle.png … cmp_11_throughput_vs_resources.png
 │   └── mega_comparison.png
