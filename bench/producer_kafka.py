@@ -15,6 +15,7 @@ from pathlib import Path
 
 from confluent_kafka import Producer
 from dotenv import dotenv_values
+from tqdm import tqdm
 
 _env = dotenv_values(Path(__file__).resolve().parent.parent / "kafka-client.env")
 
@@ -33,6 +34,7 @@ BATCH_SIZE = 1000  # messages per tight loop iteration before polling
 
 results_lock = threading.Lock()
 results = []
+_sent_counts: dict[int, int] = {}  # per-worker live counters for progress display
 
 
 def delivery_report(err, msg):
@@ -69,6 +71,7 @@ def producer_worker(worker_id):
                 except Exception:
                     errors += 1
         p.poll(0)
+        _sent_counts[worker_id] = sent
 
     p.flush(timeout=30)
     wall = time.monotonic() - t0
@@ -112,6 +115,14 @@ def main():
         t = threading.Thread(target=producer_worker, args=(i,), daemon=True)
         threads.append(t)
         t.start()
+
+    with tqdm(
+        total=DURATION, unit="s", desc="Kafka throughput", file=sys.stderr
+    ) as pbar:
+        for _ in range(DURATION):
+            time.sleep(1)
+            pbar.update(1)
+            pbar.set_postfix(msgs=f"{sum(_sent_counts.values()):,}")
 
     for t in threads:
         t.join()

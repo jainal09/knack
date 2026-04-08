@@ -15,6 +15,7 @@ from pathlib import Path
 
 import nats
 from dotenv import dotenv_values
+from tqdm import tqdm
 
 _env = dotenv_values(Path(__file__).resolve().parent.parent / "nats-client.env")
 
@@ -32,6 +33,7 @@ PAYLOAD = b"x" * int(_cfg("PAYLOAD_BYTES"))
 NUM_PROD = int(_cfg("NUM_PRODUCERS"))
 
 results = []
+_sent_counts: dict[int, int] = {}  # per-worker live counters for progress display
 
 
 async def ensure_stream(js):
@@ -77,6 +79,7 @@ async def producer_worker(worker_id, js):
     while time.monotonic() - t0 < DURATION:
         tasks = [asyncio.create_task(_pub()) for _ in range(BATCH_SIZE)]
         await asyncio.gather(*tasks)
+        _sent_counts[worker_id] = sent
 
     wall = time.monotonic() - t0
     results.append(
@@ -97,8 +100,21 @@ async def main():
     await ensure_stream(js)
     await asyncio.sleep(1)
 
-    tasks = [asyncio.create_task(producer_worker(i, js)) for i in range(NUM_PROD)]
-    await asyncio.gather(*tasks)
+    async def _progress_monitor():
+        with tqdm(
+            total=DURATION, unit="s", desc="NATS throughput", file=sys.stderr
+        ) as pbar:
+            for _ in range(DURATION):
+                await asyncio.sleep(1)
+                pbar.update(1)
+                pbar.set_postfix(msgs=f"{sum(_sent_counts.values()):,}")
+
+    worker_tasks = [
+        asyncio.create_task(producer_worker(i, js)) for i in range(NUM_PROD)
+    ]
+    monitor = asyncio.create_task(_progress_monitor())
+    await asyncio.gather(*worker_tasks)
+    monitor.cancel()
     await nc.close()
 
     total_sent = sum(r["sent"] for r in results)

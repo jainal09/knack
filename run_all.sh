@@ -50,6 +50,7 @@ source "$PROJECT_ROOT/env.sh"
 
 # --- CLI overrides ---
 RESUME=0
+RERUN_STEPS=()
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --quick)
@@ -58,6 +59,7 @@ while [[ $# -gt 0 ]]; do
       export IDLE_WAIT=30
       export LATENCY_DURATION_SEC=30
       export NUM_PRODUCERS=2
+      export SCALING_CPU_LEVELS="2.0 1.0 0.5"
       shift ;;
     --duration)
       export TEST_DURATION_SEC="$2"; shift 2 ;;
@@ -75,6 +77,11 @@ while [[ $# -gt 0 ]]; do
       export RESULTS_DIR="$2"; shift 2 ;;
     --resume)
       RESUME=1; shift ;;
+    --rerun)
+      # Remove specific steps from checkpoint so they re-run with --resume
+      # Usage: --rerun cli_throughput,consumer,prodcon
+      RESUME=1
+      IFS=',' read -ra RERUN_STEPS <<< "$2"; shift 2 ;;
     -h|--help)
       echo "Usage: $0 [OPTIONS]"
       echo ""
@@ -88,6 +95,9 @@ while [[ $# -gt 0 ]]; do
       echo "  --ui                 Start UI containers alongside brokers"
       echo "  --results-dir DIR    Output directory for results"
       echo "  --resume             Resume from last checkpoint (skip completed steps)"
+      echo "  --rerun STEPS        Re-run specific steps (comma-separated), implies --resume"
+      echo "                       Steps: idle,startup,throughput,latency,memory_stress,"
+      echo "                              cli_throughput,consumer,prodcon,resource_scaling"
       echo "  -h, --help           Show this help"
       exit 0 ;;
     *) echo "Unknown option: $1"; exit 1 ;;
@@ -121,6 +131,13 @@ mark_done() {
 }
 
 if [[ $RESUME -eq 1 && -f "$CHECKPOINT_FILE" ]]; then
+  # Remove steps requested for re-run from checkpoint
+  if [[ ${#RERUN_STEPS[@]} -gt 0 ]]; then
+    for step in "${RERUN_STEPS[@]}"; do
+      sed -i "/^${step}$/d" "$CHECKPOINT_FILE"
+    done
+    echo "Re-running steps: ${RERUN_STEPS[*]}"
+  fi
   echo "Resuming — completed steps: $(tr '\n' ', ' < "$CHECKPOINT_FILE")"
   echo ""
 else
@@ -141,7 +158,7 @@ _BLUE='\033[1;34m'
 _MAG='\033[1;35m'
 
 # ─── Progress helpers ────────────────────────────────────────────────────────
-TOTAL_STEPS=8
+TOTAL_STEPS=11
 _STEP=0
 _SUITE_START=$(date +%s)
 
@@ -159,7 +176,7 @@ printf "${_MAG}============================================${_RST}\n"
 printf "${_MAG}  Kafka vs NATS JetStream Benchmark Suite${_RST}\n"
 printf "${_MAG}  Started: $(date -Iseconds)${_RST}\n"
 printf "${_BLUE}  CPUs: ${BENCH_CPUS} | RAM: ${BENCH_MEMORY} | UI: ${COMPOSE_PROFILES:-off}${_RST}\n"
-printf "${_BLUE}  Duration: ${TEST_DURATION_SEC}s | Reps: ${REPS} | Producers: ${NUM_PRODUCERS} | Throughput: UNCAPPED${_RST}\n"
+printf "${_BLUE}  Duration: ${TEST_DURATION_SEC}s | Reps: ${REPS} | Producers: ${NUM_PRODUCERS} | Consumers: ${NUM_CONSUMERS} | Throughput: UNCAPPED${_RST}\n"
 printf "${_BLUE}  Results:  ${RESULTS_DIR}${_RST}\n"
 printf "${_MAG}============================================${_RST}\n"
 echo ""
@@ -234,6 +251,39 @@ else
   bash "$PROJECT_ROOT/scripts/bench_cli_throughput.sh"
   printf "${_GREEN}[%s] ✔ CLI-Native Throughput complete${_RST}\n" "$(date '+%Y-%m-%d %H:%M:%S')"
   mark_done "cli_throughput"
+fi
+echo ""
+
+# --- Scenario H: Consumer throughput ---
+if step_done "consumer"; then
+  progress "Consumer Throughput [SKIPPED]"
+else
+  progress "Consumer Throughput"
+  bash "$PROJECT_ROOT/scripts/bench_consumer.sh"
+  printf "${_GREEN}[%s] ✔ Consumer Throughput complete${_RST}\n" "$(date '+%Y-%m-%d %H:%M:%S')"
+  mark_done "consumer"
+fi
+echo ""
+
+# --- Scenario I: Simultaneous Producer+Consumer ---
+if step_done "prodcon"; then
+  progress "Simultaneous Producer+Consumer [SKIPPED]"
+else
+  progress "Simultaneous Producer+Consumer"
+  bash "$PROJECT_ROOT/scripts/bench_prodcon.sh"
+  printf "${_GREEN}[%s] ✔ Simultaneous Producer+Consumer complete${_RST}\n" "$(date '+%Y-%m-%d %H:%M:%S')"
+  mark_done "prodcon"
+fi
+echo ""
+
+# --- Scenario J: Resource Scaling ---
+if step_done "resource_scaling"; then
+  progress "Resource Scaling [SKIPPED]"
+else
+  progress "Resource Scaling"
+  bash "$PROJECT_ROOT/scripts/bench_resource_scaling.sh"
+  printf "${_GREEN}[%s] ✔ Resource Scaling complete${_RST}\n" "$(date '+%Y-%m-%d %H:%M:%S')"
+  mark_done "resource_scaling"
 fi
 echo ""
 

@@ -11,6 +11,9 @@ export NUM_PRODUCERS="${NUM_PRODUCERS:-4}"             # Parallel producer threa
 export TEST_DURATION_SEC="${TEST_DURATION_SEC:-600}"   # 10 min sustained run
 export REPS="${REPS:-3}"                               # Number of repetitions; median used
 
+export NUM_CONSUMERS="${NUM_CONSUMERS:-4}"
+export SCALING_CPU_LEVELS="${SCALING_CPU_LEVELS:-4.0 3.0 2.0 1.5 1.0 0.5}"
+
 export KAFKA_BROKER="localhost:9092"
 export NATS_URL="nats://localhost:4222"
 export KAFKA_TOPIC="bench"

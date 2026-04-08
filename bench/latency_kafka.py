@@ -17,6 +17,7 @@ from confluent_kafka import Consumer, KafkaError, Producer
 from confluent_kafka.admin import AdminClient, NewTopic
 from dotenv import dotenv_values
 from latency_common import extract_latency_us, stamp_payload
+from tqdm import tqdm
 
 _env = dotenv_values(Path(__file__).resolve().parent.parent / "kafka-client.env")
 
@@ -96,16 +97,19 @@ def main():
     )
     t0 = time.monotonic()
     sent = 0
-    while time.monotonic() - t0 < DURATION:
-        batch_start = time.monotonic()
-        for _ in range(TARGET_RATE):
-            payload = stamp_payload(PAYLOAD_SZ)
-            p.produce(TOPIC, payload)
-            sent += 1
-        p.flush()
-        elapsed = time.monotonic() - batch_start
-        if elapsed < 1.0:
-            time.sleep(1.0 - elapsed)
+    with tqdm(total=DURATION, unit="s", desc="Kafka latency", file=sys.stderr) as pbar:
+        while time.monotonic() - t0 < DURATION:
+            batch_start = time.monotonic()
+            for _ in range(TARGET_RATE):
+                payload = stamp_payload(PAYLOAD_SZ)
+                p.produce(TOPIC, payload)
+                sent += 1
+            p.flush()
+            elapsed = time.monotonic() - batch_start
+            if elapsed < 1.0:
+                time.sleep(1.0 - elapsed)
+            pbar.update(1)
+            pbar.set_postfix(msgs=f"{sent:,}")
 
     p.flush(timeout=10)
     time.sleep(3)  # drain

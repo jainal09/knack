@@ -1,0 +1,238 @@
+#!/usr/bin/env python3
+"""Kafka simultaneous producer+consumer — sustained load benchmark.
+
+Runs NUM_PRODUCERS producer threads and NUM_CONSUMERS consumer threads
+simultaneously on a dedicated topic for TEST_DURATION_SEC seconds.
+Measures throughput from both sides under bidirectional pressure.
+"""
+
+import json
+import os
+import sys
+import threading
+import time
+from pathlib import Path
+
+from confluent_kafka import Consumer, Producer
+from confluent_kafka.admin import AdminClient, NewTopic
+from dotenv import dotenv_values
+from tqdm import tqdm
+
+_env = dotenv_values(Path(__file__).resolve().parent.parent / "kafka-client.env")
+
+
+def _cfg(key):
+    """Env var overrides .env file value."""
+    return os.environ.get(key, _env[key])
+
+
+BROKER = _cfg("KAFKA_BROKER")
+TOPIC = _cfg("KAFKA_PRODCON_TOPIC")
+DURATION = int(_cfg("TEST_DURATION_SEC"))
+PAYLOAD = b"x" * int(_cfg("PAYLOAD_BYTES"))
+NUM_PROD = int(_cfg("NUM_PRODUCERS"))
+NUM_CONS = int(_cfg("NUM_CONSUMERS"))
+BATCH_SIZE = 500
+
+producer_results_lock = threading.Lock()
+producer_results = []
+consumer_results_lock = threading.Lock()
+consumer_results = []
+_prod_counts: dict[int, int] = {}
+_cons_counts: dict[int, int] = {}
+
+
+def delivery_report(err, msg):
+    if err is not None:
+        sys.stderr.write(f"Delivery failed: {err}\n")
+
+
+def ensure_topic():
+    """Create the prodcon benchmark topic if it doesn't exist."""
+    admin = AdminClient({"bootstrap.servers": BROKER})
+    num_parts = max(NUM_PROD, NUM_CONS)
+    topic = NewTopic(TOPIC, num_partitions=num_parts, replication_factor=1)
+    fs = admin.create_topics([topic])
+    for t, f in fs.items():
+        try:
+            f.result()
+            print(f"Created topic {t}", file=sys.stderr)
+        except Exception as e:
+            if "TOPIC_ALREADY_EXISTS" in str(e):
+                print(f"Topic {t} already exists", file=sys.stderr)
+            else:
+                print(f"Warning creating topic: {e}", file=sys.stderr)
+
+
+def producer_worker(worker_id, stop_event):
+    """Single producer thread: sends as fast as possible until stop_event."""
+    p = Producer(
+        {
+            "bootstrap.servers": BROKER,
+            "acks": "all",
+            "linger.ms": 5,
+            "batch.num.messages": 1000,
+            "queue.buffering.max.messages": 100000,
+        }
+    )
+
+    sent = 0
+    errors = 0
+    t0 = time.monotonic()
+
+    while not stop_event.is_set():
+        for _ in range(BATCH_SIZE):
+            try:
+                p.produce(TOPIC, PAYLOAD, callback=delivery_report)
+                sent += 1
+            except BufferError:
+                p.poll(0.1)
+                try:
+                    p.produce(TOPIC, PAYLOAD, callback=delivery_report)
+                    sent += 1
+                except Exception:
+                    errors += 1
+        p.poll(0)
+        _prod_counts[worker_id] = sent
+
+    p.flush(timeout=30)
+    wall = time.monotonic() - t0
+
+    with producer_results_lock:
+        producer_results.append(
+            {
+                "worker": worker_id,
+                "sent": sent,
+                "errors": errors,
+                "wall_sec": round(wall, 2),
+                "avg_rate": round(sent / wall, 1),
+            }
+        )
+
+
+def consumer_worker(worker_id, stop_event):
+    """Single consumer thread: batch-consumes as fast as possible until stop_event."""
+    c = Consumer(
+        {
+            "bootstrap.servers": BROKER,
+            "group.id": "bench-prodcon-group",
+            "auto.offset.reset": "latest",
+            "enable.auto.commit": True,
+        }
+    )
+    c.subscribe([TOPIC])
+
+    consumed = 0
+    t0 = time.monotonic()
+
+    while not stop_event.is_set():
+        msgs = c.consume(num_messages=500, timeout=0.5)
+        if not msgs:
+            continue
+        for msg in msgs:
+            if msg.error():
+                continue
+            consumed += 1
+        _cons_counts[worker_id] = consumed
+
+    # Drain remaining messages for a few seconds
+    drain_deadline = time.monotonic() + 3
+    while time.monotonic() < drain_deadline:
+        msgs = c.consume(num_messages=500, timeout=0.5)
+        if not msgs:
+            break
+        for msg in msgs:
+            if msg.error():
+                continue
+            consumed += 1
+        _cons_counts[worker_id] = consumed
+
+    c.close()
+    wall = time.monotonic() - t0
+
+    with consumer_results_lock:
+        consumer_results.append(
+            {
+                "worker": worker_id,
+                "consumed": consumed,
+                "wall_sec": round(wall, 2),
+                "avg_rate": round(consumed / wall, 1) if wall > 0 else 0,
+            }
+        )
+
+
+def main():
+    ensure_topic()
+    time.sleep(2)
+
+    stop_event = threading.Event()
+
+    # Start consumers first so they don't miss early messages
+    cons_threads = []
+    for i in range(NUM_CONS):
+        t = threading.Thread(target=consumer_worker, args=(i, stop_event), daemon=True)
+        cons_threads.append(t)
+        t.start()
+
+    time.sleep(2)  # Let consumers subscribe and rebalance
+
+    # Start producers
+    prod_threads = []
+    for i in range(NUM_PROD):
+        t = threading.Thread(target=producer_worker, args=(i, stop_event), daemon=True)
+        prod_threads.append(t)
+        t.start()
+
+    # Progress bar
+    with tqdm(
+        total=DURATION, unit="s", desc="Kafka prodcon", file=sys.stderr
+    ) as pbar:
+        for _ in range(DURATION):
+            time.sleep(1)
+            pbar.update(1)
+            prod_total = sum(_prod_counts.values())
+            cons_total = sum(_cons_counts.values())
+            pbar.set_postfix(prod=f"{prod_total:,}", cons=f"{cons_total:,}")
+
+    stop_event.set()
+
+    for t in prod_threads:
+        t.join(timeout=10)
+    for t in cons_threads:
+        t.join(timeout=10)
+
+    # Aggregate producer results
+    prod_total_sent = sum(r["sent"] for r in producer_results)
+    prod_total_wall = max(r["wall_sec"] for r in producer_results) if producer_results else 0
+    prod_total_errors = sum(r["errors"] for r in producer_results)
+
+    # Aggregate consumer results
+    cons_total_consumed = sum(r["consumed"] for r in consumer_results)
+    cons_total_wall = max(r["wall_sec"] for r in consumer_results) if consumer_results else 0
+
+    output = {
+        "broker": "kafka",
+        "test_type": "prodcon",
+        "num_producers": NUM_PROD,
+        "num_consumers": NUM_CONS,
+        "payload_bytes": int(_cfg("PAYLOAD_BYTES")),
+        "duration_sec": DURATION,
+        "producer": {
+            "total_sent": prod_total_sent,
+            "total_errors": prod_total_errors,
+            "wall_sec": prod_total_wall,
+            "aggregate_rate": round(prod_total_sent / prod_total_wall, 1) if prod_total_wall > 0 else 0,
+            "per_worker": producer_results,
+        },
+        "consumer": {
+            "total_consumed": cons_total_consumed,
+            "wall_sec": cons_total_wall,
+            "aggregate_rate": round(cons_total_consumed / cons_total_wall, 1) if cons_total_wall > 0 else 0,
+            "per_worker": consumer_results,
+        },
+    }
+    print(json.dumps(output, indent=2))
+
+
+if __name__ == "__main__":
+    main()

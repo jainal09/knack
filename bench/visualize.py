@@ -26,6 +26,7 @@ NATS_COLOR = "#27AAE1"
 BROKERS = ["kafka", "nats"]
 COLORS = {"kafka": KAFKA_COLOR, "nats": NATS_COLOR}
 SCENARIO_COLORS = {"large": "#4CAF50", "medium": "#FF9800", "small": "#F44336"}
+REPS = int(os.environ.get("REPS", "3"))
 
 
 def load(name):
@@ -73,6 +74,30 @@ def setup_style():
 # ── Chart 1: Idle Footprint ──────────────────────────────────────────
 
 
+def _annotate_direction(ax, text, loc="upper right"):
+    """Add a small 'higher/lower is better' annotation to a chart."""
+    anchor = {
+        "upper right": (0.98, 0.97),
+        "upper left": (0.02, 0.97),
+        "lower right": (0.98, 0.03),
+        "lower left": (0.02, 0.03),
+    }
+    ha = "right" if "right" in loc else "left"
+    va = "top" if "upper" in loc else "bottom"
+    xy = anchor.get(loc, (0.98, 0.97))
+    ax.annotate(
+        text,
+        xy=xy,
+        xycoords="axes fraction",
+        ha=ha,
+        va=va,
+        fontsize=8,
+        fontstyle="italic",
+        color="#888",
+        bbox=dict(boxstyle="round,pad=0.3", fc="#222", ec="#555", alpha=0.8),
+    )
+
+
 def chart_idle():
     """Bar chart: idle RAM + CPU for both brokers."""
     data = {}
@@ -109,12 +134,25 @@ def chart_idle():
     ax1.set_title("Memory Usage")
     for i, v in enumerate(ram):
         ax1.text(i, v + max(ram) * 0.02, f"{v:.0f}", ha="center", fontweight="bold")
+    _annotate_direction(ax1, "\u2193 Lower is better")
 
     ax2.bar(brokers, cpu, color=colors, width=0.5)
     ax2.set_ylabel("CPU %")
     ax2.set_title("CPU Usage")
     for i, v in enumerate(cpu):
         ax2.text(i, v + max(cpu) * 0.02, f"{v:.1f}%", ha="center", fontweight="bold")
+    _annotate_direction(ax2, "\u2193 Lower is better")
+
+    fig.text(
+        0.5,
+        -0.02,
+        "Resource consumption when broker is running but idle (no producers/consumers connected).\n"
+        "Shows the baseline cost of running each broker. Lower = less wasted resources when traffic is quiet.",
+        ha="center",
+        fontsize=8,
+        color="#888",
+        style="italic",
+    )
 
     plt.tight_layout()
     fig.savefig(CHARTS / "01_idle_footprint.png", bbox_inches="tight")
@@ -190,6 +228,18 @@ def chart_startup():
             fontsize=9,
             fontweight="bold",
         )
+    _annotate_direction(ax, "\u2193 Lower is better")
+
+    fig.text(
+        0.5,
+        -0.02,
+        "Time from 'docker start' to broker accepting connections (Cold Start) and after SIGKILL crash (Recovery).\n"
+        "Measures operational resilience — how fast the broker recovers from restarts or failures.",
+        ha="center",
+        fontsize=8,
+        color="#888",
+        style="italic",
+    )
 
     plt.tight_layout()
     fig.savefig(CHARTS / "02_startup_recovery.png", bbox_inches="tight")
@@ -201,50 +251,171 @@ def chart_startup():
 
 
 def chart_throughput():
-    """Bar chart with error markers: median throughput across 3 runs."""
-    data = {}
+    """Grouped bar: Python client vs CLI producer throughput for both brokers."""
+    py_data = {}
+    cli_data = {}
     for b in BROKERS:
+        # Python client
         rates = []
-        for i in range(1, 4):
+        for i in range(1, REPS + 1):
             d = load(f"{b}_throughput_run{i}.json")
             if d and "aggregate_rate" in d:
                 rates.append(d["aggregate_rate"])
         if rates:
-            data[b] = {"rates": rates, "median": sorted(rates)[len(rates) // 2]}
+            py_data[b] = sorted(rates)[len(rates) // 2]
+        # CLI
+        d = load(f"{b}_cli_throughput.json")
+        if d and "msgs_per_sec" in d:
+            cli_data[b] = d["msgs_per_sec"]
 
-    if not data:
+    if not py_data and not cli_data:
         return
 
-    fig, ax = plt.subplots(figsize=(8, 5))
-    fig.suptitle("Sustained Throughput (median of 3 runs)", fontweight="bold")
+    fig, ax = plt.subplots(figsize=(10, 5))
+    fig.suptitle("Producer Throughput — Python Client vs CLI", fontweight="bold")
 
-    brokers = list(data.keys())
-    medians = [data[b]["median"] for b in brokers]
-    all_rates = [data[b]["rates"] for b in brokers]
-    colors = [COLORS[b] for b in brokers]
+    x = np.arange(len(BROKERS))
+    w = 0.3
 
-    ax.bar(brokers, medians, color=colors, width=0.5)
+    py_vals = [py_data.get(b, 0) for b in BROKERS]
+    cli_vals = [cli_data.get(b, 0) for b in BROKERS]
 
-    # scatter individual runs
-    for i, b in enumerate(brokers):
-        ax.scatter(
-            [i] * len(all_rates[i]),
-            all_rates[i],
-            color="white",
-            zorder=5,
-            s=30,
-            edgecolors="#333",
-            linewidth=0.5,
-        )
+    bars1 = ax.bar(
+        x - w / 2,
+        py_vals,
+        w,
+        label="Python Client",
+        color=[COLORS[b] for b in BROKERS],
+        alpha=0.85,
+    )
+    bars2 = ax.bar(
+        x + w / 2,
+        cli_vals,
+        w,
+        label="CLI (kcat / nats bench)",
+        color=[COLORS[b] for b in BROKERS],
+        alpha=0.5,
+    )
 
-    ax.set_ylabel("Messages / sec (aggregate)")
-    for i, v in enumerate(medians):
-        ax.text(i, v + max(medians) * 0.02, f"{v:,.0f}", ha="center", fontweight="bold")
+    ax.set_ylabel("Messages / sec")
+    ax.set_xticks(x)
+    ax.set_xticklabels([b.upper() for b in BROKERS])
+    ax.legend()
+
+    for bar in list(bars1) + list(bars2):
+        h = bar.get_height()
+        if h > 0:
+            ax.text(
+                bar.get_x() + bar.get_width() / 2,
+                h,
+                f"{h:,.0f}",
+                ha="center",
+                va="bottom",
+                fontsize=9,
+                fontweight="bold",
+            )
+    _annotate_direction(ax, "\u2191 Higher is better")
+
+    fig.text(
+        0.5,
+        -0.02,
+        "Compares message production speed using Python client libraries vs native CLI tools.\n"
+        "Python client reflects application-level performance; CLI reflects raw broker capacity.",
+        ha="center",
+        fontsize=8,
+        color="#888",
+        style="italic",
+    )
 
     plt.tight_layout()
     fig.savefig(CHARTS / "03_throughput.png", bbox_inches="tight")
     plt.close()
     print("  -> 03_throughput.png")
+
+
+# ── Chart 3b: CLI-only Throughput ────────────────────────────────────
+
+
+def chart_cli_throughput():
+    """Standalone bar chart: CLI producer, consumer, and prodcon for both brokers."""
+    metrics = []
+
+    # CLI Producer
+    for b in BROKERS:
+        d = load(f"{b}_cli_throughput.json")
+        if d and "msgs_per_sec" in d:
+            metrics.append(("Producer", b, d["msgs_per_sec"]))
+
+    # CLI Consumer
+    for b in BROKERS:
+        d = load(f"{b}_cli_consumer.json")
+        if d and "msgs_per_sec" in d:
+            metrics.append(("Consumer", b, d["msgs_per_sec"]))
+
+    # CLI ProdCon
+    for b in BROKERS:
+        d = load(f"{b}_cli_prodcon.json")
+        if d:
+            pr = d.get("producer_msgs_per_sec", 0)
+            cr = d.get("consumer_msgs_per_sec", 0)
+            if pr:
+                metrics.append(("ProdCon Pub", b, pr))
+            if cr:
+                metrics.append(("ProdCon Sub", b, cr))
+
+    if not metrics:
+        return
+
+    # Group by test type
+    test_types = list(dict.fromkeys(m[0] for m in metrics))
+    x = np.arange(len(test_types))
+    w = 0.3
+
+    fig, ax = plt.subplots(figsize=(12, 5))
+    fig.suptitle("CLI-Native Throughput — kcat vs nats bench", fontweight="bold")
+
+    for i, b in enumerate(BROKERS):
+        vals = []
+        for tt in test_types:
+            v = next((m[2] for m in metrics if m[0] == tt and m[1] == b), 0)
+            vals.append(v)
+        offset = (i - 0.5) * w
+        bars = ax.bar(x + offset, vals, w, label=b.upper(), color=COLORS[b], alpha=0.85)
+        for bar in bars:
+            h = bar.get_height()
+            if h > 0:
+                ax.text(
+                    bar.get_x() + bar.get_width() / 2,
+                    h,
+                    f"{h:,.0f}",
+                    ha="center",
+                    va="bottom",
+                    fontsize=8,
+                    fontweight="bold",
+                )
+
+    ax.set_ylabel("Messages / sec")
+    ax.set_xlabel("Test Type")
+    ax.set_xticks(x)
+    ax.set_xticklabels(test_types)
+    ax.legend()
+    _annotate_direction(ax, "\u2191 Higher is better")
+
+    fig.text(
+        0.5,
+        -0.02,
+        "Raw broker throughput measured with native CLI tools (kcat for Kafka, nats bench for NATS).\n"
+        "Eliminates Python client overhead — reflects broker protocol efficiency and I/O design.",
+        ha="center",
+        fontsize=8,
+        color="#888",
+        style="italic",
+    )
+
+    plt.tight_layout()
+    fig.savefig(CHARTS / "03b_cli_throughput.png", bbox_inches="tight")
+    plt.close()
+    print("  -> 03b_cli_throughput.png")
 
 
 # ── Chart 4: Latency Percentiles ─────────────────────────────────────
@@ -291,7 +462,20 @@ def chart_latency():
     ax.set_xticklabels(labels)
     ax.legend()
     ax.set_yscale("log")
+    ax.set_xlabel("Latency Percentile")
     ax.grid(axis="y", alpha=0.3)
+    _annotate_direction(ax, "\u2193 Lower is better")
+
+    fig.text(
+        0.5,
+        -0.02,
+        "End-to-end latency (producer \u2192 consumer) measured at 50% of peak throughput.\n"
+        "p99 = 99th percentile — the worst latency experienced by 99% of messages. Critical for SLA compliance.",
+        ha="center",
+        fontsize=8,
+        color="#888",
+        style="italic",
+    )
 
     plt.tight_layout()
     fig.savefig(CHARTS / "04_latency.png", bbox_inches="tight")
@@ -363,6 +547,17 @@ def chart_memory_stress():
     ax.set_yticks([])
     ax.set_ylim(0, 1.2)
 
+    fig.text(
+        0.5,
+        -0.02,
+        "Tests broker stability under progressively restricted memory (Docker cgroup limits).\n"
+        "PASS = broker runs and serves traffic. Shows minimum RAM needed for each broker to function.",
+        ha="center",
+        fontsize=8,
+        color="#888",
+        style="italic",
+    )
+
     plt.tight_layout()
     fig.savefig(CHARTS / "05_memory_stress.png", bbox_inches="tight")
     plt.close()
@@ -373,70 +568,989 @@ def chart_memory_stress():
 
 
 def chart_scorecard():
-    """Table-style summary of all metrics side by side."""
+    """Comprehensive table scorecard: Kafka vs NATS with Python + CLI data."""
     report = load("full_report.json")
     if not report:
         return
 
+    # Build rows: (Metric, Kafka, NATS, Direction, Winner)
     rows = []
 
-    # Throughput
+    def _winner(kafka_val, nats_val, lower_better=False):
+        if kafka_val is None or nats_val is None:
+            return ""
+        if kafka_val == nats_val:
+            return "TIE"
+        if lower_better:
+            return "KAFKA" if kafka_val < nats_val else "NATS"
+        return "KAFKA" if kafka_val > nats_val else "NATS"
+
+    # Idle footprint
+    kafka_idle = load("kafka_idle_stats.json")
+    nats_idle = load("nats_idle_stats.json")
+    if kafka_idle and nats_idle:
+        k_mem = kafka_idle.get("mem_usage", "?")
+        n_mem = nats_idle.get("mem_usage", "?")
+        k_cpu = kafka_idle.get("cpu_pct", "?")
+        n_cpu = nats_idle.get("cpu_pct", "?")
+        rows.append(
+            (
+                "Idle RAM",
+                k_mem.split("/")[0].strip(),
+                n_mem.split("/")[0].strip(),
+                "\u2193 Lower",
+                "NATS",
+            )
+        )
+        rows.append(("Idle CPU", k_cpu, n_cpu, "\u2193 Lower", "NATS"))
+
+    # Producer throughput (Python)
+    k_tp = report.get("throughput", {}).get("kafka", {}).get("median_aggregate_rate")
+    n_tp = report.get("throughput", {}).get("nats", {}).get("median_aggregate_rate")
+    if k_tp or n_tp:
+        rows.append(
+            (
+                "Producer (Python)",
+                f"{k_tp:,.0f}/s" if k_tp else "—",
+                f"{n_tp:,.0f}/s" if n_tp else "—",
+                "\u2191 Higher",
+                _winner(k_tp, n_tp),
+            )
+        )
+
+    # Producer throughput (CLI)
+    k_cli = load("kafka_cli_throughput.json")
+    n_cli = load("nats_cli_throughput.json")
+    k_cli_tp = k_cli.get("msgs_per_sec") if k_cli else None
+    n_cli_tp = n_cli.get("msgs_per_sec") if n_cli else None
+    if k_cli_tp or n_cli_tp:
+        rows.append(
+            (
+                "Producer (CLI)",
+                f"{k_cli_tp:,.0f}/s" if k_cli_tp else "—",
+                f"{n_cli_tp:,.0f}/s" if n_cli_tp else "—",
+                "\u2191 Higher",
+                _winner(k_cli_tp, n_cli_tp),
+            )
+        )
+
+    # Consumer throughput (Python)
+    k_ct = (
+        report.get("consumer_throughput", {})
+        .get("kafka", {})
+        .get("median_aggregate_rate")
+    )
+    n_ct = (
+        report.get("consumer_throughput", {})
+        .get("nats", {})
+        .get("median_aggregate_rate")
+    )
+    if k_ct or n_ct:
+        rows.append(
+            (
+                "Consumer (Python)",
+                f"{k_ct:,.0f}/s" if k_ct else "—",
+                f"{n_ct:,.0f}/s" if n_ct else "—",
+                "\u2191 Higher",
+                _winner(k_ct, n_ct),
+            )
+        )
+
+    # Consumer throughput (CLI)
+    k_cli_c = load("kafka_cli_consumer.json")
+    n_cli_c = load("nats_cli_consumer.json")
+    k_cli_ct = k_cli_c.get("msgs_per_sec") if k_cli_c else None
+    n_cli_ct = n_cli_c.get("msgs_per_sec") if n_cli_c else None
+    if k_cli_ct or n_cli_ct:
+        rows.append(
+            (
+                "Consumer (CLI)",
+                f"{k_cli_ct:,.0f}/s" if k_cli_ct else "—",
+                f"{n_cli_ct:,.0f}/s" if n_cli_ct else "—",
+                "\u2191 Higher",
+                _winner(k_cli_ct, n_cli_ct),
+            )
+        )
+
+    # ProdCon (Python)
     for b in BROKERS:
-        t = report.get("throughput", {}).get(b, {})
-        rate = t.get("median_aggregate_rate")
-        if rate:
-            rows.append((f"{b.upper()} Throughput", f"{rate:,.0f} msg/s"))
+        pc = report.get("prodcon", {}).get(b, {})
+        if pc:
+            pr = pc.get("producer", {}).get("aggregate_rate")
+            cr = pc.get("consumer", {}).get("aggregate_rate")
+            if pr and cr:
+                if b == "kafka":
+                    k_pc_str = f"P:{pr:,.0f} C:{cr:,.0f}"
+                    k_pc_total = pr + cr
+                else:
+                    n_pc_str = f"P:{pr:,.0f} C:{cr:,.0f}"
+                    n_pc_total = pr + cr
+    if "k_pc_str" in dir() and "n_pc_str" in dir():
+        rows.append(
+            (
+                "ProdCon (Python)",
+                k_pc_str,
+                n_pc_str,
+                "\u2191 Higher",
+                _winner(k_pc_total, n_pc_total),
+            )
+        )
+
+    # ProdCon (CLI)
+    k_cli_pc = load("kafka_cli_prodcon.json")
+    n_cli_pc = load("nats_cli_prodcon.json")
+    if k_cli_pc and n_cli_pc:
+        k_pp = k_cli_pc.get("producer_msgs_per_sec", 0)
+        k_cp = k_cli_pc.get("consumer_msgs_per_sec", 0)
+        n_pp = n_cli_pc.get("producer_msgs_per_sec", 0)
+        n_cp = n_cli_pc.get("consumer_msgs_per_sec", 0)
+        rows.append(
+            (
+                "ProdCon (CLI)",
+                f"P:{k_pp:,.0f} C:{k_cp:,.0f}",
+                f"P:{n_pp:,.0f} C:{n_cp:,.0f}",
+                "\u2191 Higher",
+                _winner(k_pp + k_cp, n_pp + n_cp),
+            )
+        )
 
     # Latency
-    for b in BROKERS:
-        lat = report.get("latency", {}).get(b, {})
-        p99 = lat.get("p99_us")
-        if p99:
-            rows.append((f"{b.upper()} p99 Latency", f"{p99:,.0f} µs"))
+    k_lat = report.get("latency", {}).get("kafka", {}).get("p99_us")
+    n_lat = report.get("latency", {}).get("nats", {}).get("p99_us")
+    if k_lat or n_lat:
+        rows.append(
+            (
+                "p99 Latency",
+                f"{k_lat:,.0f} \u00b5s" if k_lat else "—",
+                f"{n_lat:,.0f} \u00b5s" if n_lat else "—",
+                "\u2193 Lower",
+                _winner(k_lat, n_lat, lower_better=True),
+            )
+        )
 
-    # Memory
-    for b in BROKERS:
-        mem = report.get("memory_stress", {}).get(b, {})
-        min_ram = mem.get("min_viable_ram")
-        if min_ram:
-            rows.append((f"{b.upper()} Min RAM", min_ram.upper()))
+    # Min RAM
+    k_ram = report.get("memory_stress", {}).get("kafka", {}).get("min_viable_ram")
+    n_ram = report.get("memory_stress", {}).get("nats", {}).get("min_viable_ram")
+    if k_ram or n_ram:
+        rows.append(
+            (
+                "Min Viable RAM",
+                (k_ram or "—").upper(),
+                (n_ram or "—").upper(),
+                "\u2193 Lower",
+                "TIE" if k_ram == n_ram else "",
+            )
+        )
 
     # Decision
     dec = report.get("decision", {})
     if dec.get("recommendation"):
-        rows.append(("RECOMMENDATION", dec["recommendation"]))
+        rows.append(("RECOMMENDATION", "", dec["recommendation"], "", ""))
 
     if not rows:
         return
 
-    fig, ax = plt.subplots(figsize=(8, 0.5 * len(rows) + 1))
-    fig.suptitle("Benchmark Scorecard", fontweight="bold", fontsize=14)
+    # Build table
+    col_labels = ["Metric", "KAFKA", "NATS", "Direction", "Winner"]
+    cell_text = [[r[0], r[1], r[2], r[3], r[4]] for r in rows]
+
+    fig_height = max(5, 0.45 * len(rows) + 1.5)
+    fig, ax = plt.subplots(figsize=(14, fig_height))
+    fig.suptitle(
+        "Benchmark Scorecard — Kafka vs NATS JetStream",
+        fontweight="bold",
+        fontsize=16,
+        y=0.98,
+    )
     ax.axis("off")
 
     table = ax.table(
-        cellText=[[r[1]] for r in rows],
-        rowLabels=[r[0] for r in rows],
-        colLabels=["Value"],
+        cellText=cell_text,
+        colLabels=col_labels,
         loc="center",
         cellLoc="center",
     )
     table.auto_set_font_size(False)
-    table.set_fontsize(11)
-    table.scale(1.2, 1.8)
+    table.set_fontsize(10)
+    table.scale(1.0, 2.0)
 
     # Style cells
     for (row, col), cell in table.get_celld().items():
         cell.set_edgecolor("#555")
         if row == 0:
+            # Header row
             cell.set_facecolor("#444")
-            cell.set_text_props(fontweight="bold")
+            cell.set_text_props(fontweight="bold", fontsize=11, color="#fff")
+            cell.set_height(0.06)
         else:
             cell.set_facecolor("#2d2d2d")
+            # Color the winner column
+            if col == 4:
+                txt = cell.get_text().get_text()
+                if txt == "KAFKA":
+                    cell.set_text_props(color=KAFKA_COLOR, fontweight="bold")
+                elif txt == "NATS":
+                    cell.set_text_props(color=NATS_COLOR, fontweight="bold")
+            # Color metric names
+            if col == 0:
+                cell.set_text_props(fontweight="bold")
+                cell.set_facecolor("#333")
+            # Highlight recommendation row
+            if row == len(rows) and col >= 0:
+                cell.set_facecolor("#1a3a1a")
+                cell.set_text_props(fontweight="bold", fontsize=11)
+
+    # Set column widths
+    col_widths = [0.22, 0.25, 0.25, 0.13, 0.12]
+    for (row, col), cell in table.get_celld().items():
+        cell.set_width(col_widths[col])
 
     plt.tight_layout()
     fig.savefig(CHARTS / "06_scorecard.png", bbox_inches="tight")
     plt.close()
     print("  -> 06_scorecard.png")
+
+
+# ── Chart 7: Consumer Throughput ──────────────────────────────────────
+
+
+def chart_consumer_throughput():
+    """Grouped bar: Python client vs CLI consumer throughput for both brokers."""
+    py_data = {}
+    cli_data = {}
+    for b in BROKERS:
+        # Python client
+        rates = []
+        for i in range(1, REPS + 1):
+            d = load(f"{b}_consumer_run{i}.json")
+            if d and "aggregate_rate" in d:
+                rates.append(d["aggregate_rate"])
+        if rates:
+            py_data[b] = sorted(rates)[len(rates) // 2]
+        # CLI
+        d = load(f"{b}_cli_consumer.json")
+        if d and "msgs_per_sec" in d:
+            cli_data[b] = d["msgs_per_sec"]
+
+    if not py_data and not cli_data:
+        return
+
+    fig, ax = plt.subplots(figsize=(10, 5))
+    fig.suptitle("Consumer Throughput — Python Client vs CLI", fontweight="bold")
+
+    x = np.arange(len(BROKERS))
+    w = 0.3
+
+    py_vals = [py_data.get(b, 0) for b in BROKERS]
+    cli_vals = [cli_data.get(b, 0) for b in BROKERS]
+
+    bars1 = ax.bar(
+        x - w / 2,
+        py_vals,
+        w,
+        label="Python Client",
+        color=[COLORS[b] for b in BROKERS],
+        alpha=0.85,
+    )
+    bars2 = ax.bar(
+        x + w / 2,
+        cli_vals,
+        w,
+        label="CLI (kcat / nats bench)",
+        color=[COLORS[b] for b in BROKERS],
+        alpha=0.5,
+    )
+
+    ax.set_ylabel("Messages / sec")
+    ax.set_xticks(x)
+    ax.set_xticklabels([b.upper() for b in BROKERS])
+    ax.legend()
+
+    for bar in list(bars1) + list(bars2):
+        h = bar.get_height()
+        if h > 0:
+            ax.text(
+                bar.get_x() + bar.get_width() / 2,
+                h,
+                f"{h:,.0f}",
+                ha="center",
+                va="bottom",
+                fontsize=9,
+                fontweight="bold",
+            )
+    _annotate_direction(ax, "\u2191 Higher is better")
+
+    fig.text(
+        0.5,
+        -0.02,
+        "Pure consumer speed — pre-populated messages consumed as fast as possible.\n"
+        "Measures how quickly each broker can deliver stored messages to consumers.",
+        ha="center",
+        fontsize=8,
+        color="#888",
+        style="italic",
+    )
+
+    plt.tight_layout()
+    fig.savefig(CHARTS / "07_consumer_throughput.png", bbox_inches="tight")
+    plt.close()
+    print("  -> 07_consumer_throughput.png")
+
+
+# ── Chart 8: Simultaneous Producer+Consumer ──────────────────────────
+
+
+def chart_prodcon():
+    """Grouped bar: Python client vs CLI for simultaneous producer+consumer load."""
+    py_data = {}
+    cli_data = {}
+    for b in BROKERS:
+        # Python client
+        d = load(f"{b}_prodcon.json")
+        if d and "producer" in d and "consumer" in d:
+            py_data[b] = d
+        # CLI
+        d = load(f"{b}_cli_prodcon.json")
+        if d:
+            cli_data[b] = d
+
+    if not py_data and not cli_data:
+        return
+
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5))
+    fig.suptitle(
+        "Simultaneous Producer+Consumer — Python Client vs CLI", fontweight="bold"
+    )
+
+    # Left subplot: Producer rates
+    x = np.arange(len(BROKERS))
+    w = 0.3
+
+    py_prod = [
+        py_data.get(b, {}).get("producer", {}).get("aggregate_rate", 0) for b in BROKERS
+    ]
+    cli_prod = [cli_data.get(b, {}).get("producer_msgs_per_sec", 0) for b in BROKERS]
+
+    bars1 = ax1.bar(
+        x - w / 2,
+        py_prod,
+        w,
+        label="Python Client",
+        color=[COLORS[b] for b in BROKERS],
+        alpha=0.85,
+    )
+    bars2 = ax1.bar(
+        x + w / 2,
+        cli_prod,
+        w,
+        label="CLI",
+        color=[COLORS[b] for b in BROKERS],
+        alpha=0.5,
+    )
+    ax1.set_ylabel("Messages / sec")
+    ax1.set_title("Producer Rate (under simultaneous load)")
+    ax1.set_xticks(x)
+    ax1.set_xticklabels([b.upper() for b in BROKERS])
+    ax1.legend(fontsize=9)
+    for bar in list(bars1) + list(bars2):
+        h = bar.get_height()
+        if h > 0:
+            ax1.text(
+                bar.get_x() + bar.get_width() / 2,
+                h,
+                f"{h:,.0f}",
+                ha="center",
+                va="bottom",
+                fontsize=8,
+                fontweight="bold",
+            )
+
+    # Right subplot: Consumer rates
+    py_cons = [
+        py_data.get(b, {}).get("consumer", {}).get("aggregate_rate", 0) for b in BROKERS
+    ]
+    cli_cons = [cli_data.get(b, {}).get("consumer_msgs_per_sec", 0) for b in BROKERS]
+
+    bars3 = ax2.bar(
+        x - w / 2,
+        py_cons,
+        w,
+        label="Python Client",
+        color=[COLORS[b] for b in BROKERS],
+        alpha=0.85,
+    )
+    bars4 = ax2.bar(
+        x + w / 2,
+        cli_cons,
+        w,
+        label="CLI",
+        color=[COLORS[b] for b in BROKERS],
+        alpha=0.5,
+    )
+    ax2.set_ylabel("Messages / sec")
+    ax2.set_title("Consumer Rate (under simultaneous load)")
+    ax2.set_xticks(x)
+    ax2.set_xticklabels([b.upper() for b in BROKERS])
+    ax2.legend(fontsize=9)
+    for bar in list(bars3) + list(bars4):
+        h = bar.get_height()
+        if h > 0:
+            ax2.text(
+                bar.get_x() + bar.get_width() / 2,
+                h,
+                f"{h:,.0f}",
+                ha="center",
+                va="bottom",
+                fontsize=8,
+                fontweight="bold",
+            )
+    _annotate_direction(ax1, "\u2191 Higher is better")
+    _annotate_direction(ax2, "\u2191 Higher is better")
+
+    fig.text(
+        0.5,
+        -0.02,
+        "Producers and consumers running simultaneously — simulates real-world bidirectional load.\n"
+        "Shows how each broker handles contention when both writing and reading at the same time.",
+        ha="center",
+        fontsize=8,
+        color="#888",
+        style="italic",
+    )
+
+    plt.tight_layout()
+    fig.savefig(CHARTS / "08_prodcon.png", bbox_inches="tight")
+    plt.close()
+    print("  -> 08_prodcon.png")
+
+
+# ── Chart 9: Resource Timeline ───────────────────────────────────────
+
+
+def _parse_mem_usage(mem_str):
+    """Parse memory string like '428MiB / 4GiB' -> MB float."""
+    used = mem_str.split("/")[0].strip()
+    if "GiB" in used:
+        return float(used.replace("GiB", "").strip()) * 1024
+    elif "MiB" in used:
+        return float(used.replace("MiB", "").strip())
+    elif "KiB" in used:
+        return float(used.replace("KiB", "").strip()) / 1024
+    return 0
+
+
+def chart_resource_timeline():
+    """Time-series chart: CPU% and Memory over time from docker_stats.csv."""
+    import csv
+
+    csv_path = RESULTS / "docker_stats.csv"
+    if not csv_path.exists():
+        return
+
+    # Parse CSV
+    container_data = {}  # {container: [(timestamp, cpu, mem_mb), ...]}
+    target_containers = {"bench-kafka", "bench-nats"}
+
+    with open(csv_path) as f:
+        reader = csv.reader(f)
+        header = next(reader, None)
+        if not header:
+            return
+        for row in reader:
+            if len(row) < 5:
+                continue
+            try:
+                ts = int(row[0])
+                container = row[1]
+                if container not in target_containers:
+                    continue
+                cpu = float(row[2].replace("%", ""))
+                mem_mb = _parse_mem_usage(row[3])
+
+                if container not in container_data:
+                    container_data[container] = []
+                container_data[container].append((ts, cpu, mem_mb))
+            except (ValueError, IndexError):
+                continue
+
+    if not container_data:
+        return
+
+    # Find global min timestamp for relative time
+    all_ts = []
+    for points in container_data.values():
+        all_ts.extend(p[0] for p in points)
+    t0 = min(all_ts) if all_ts else 0
+
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(14, 8), sharex=True)
+    fig.suptitle(
+        "Resource Usage Over Time (from docker_stats.csv)",
+        fontweight="bold",
+        fontsize=14,
+    )
+
+    container_colors = {"bench-kafka": KAFKA_COLOR, "bench-nats": NATS_COLOR}
+
+    for container, points in sorted(container_data.items()):
+        points.sort(key=lambda p: p[0])
+        color = container_colors.get(container, "#888")
+        label = container.replace("bench-", "").upper()
+
+        # Break line at gaps > 30s
+        segments_t = []
+        segments_cpu = []
+        segments_mem = []
+        seg_t, seg_cpu, seg_mem = [], [], []
+
+        for i, (ts, cpu, mem) in enumerate(points):
+            elapsed = (ts - t0) / 60.0  # Convert to minutes
+            if seg_t and elapsed - seg_t[-1] > 0.5:  # 30s gap in minutes
+                segments_t.append(seg_t)
+                segments_cpu.append(seg_cpu)
+                segments_mem.append(seg_mem)
+                seg_t, seg_cpu, seg_mem = [], [], []
+            seg_t.append(elapsed)
+            seg_cpu.append(cpu)
+            seg_mem.append(mem)
+
+        if seg_t:
+            segments_t.append(seg_t)
+            segments_cpu.append(seg_cpu)
+            segments_mem.append(seg_mem)
+
+        for j, (st, sc, sm) in enumerate(zip(segments_t, segments_cpu, segments_mem)):
+            lbl = label if j == 0 else None
+            ax1.plot(st, sc, color=color, label=lbl, linewidth=1.0, alpha=0.8)
+            ax1.fill_between(st, sc, alpha=0.1, color=color)
+            ax2.plot(st, sm, color=color, label=lbl, linewidth=1.0, alpha=0.8)
+            ax2.fill_between(st, sm, alpha=0.1, color=color)
+
+    ax1.set_ylabel("CPU %")
+    ax1.legend(fontsize=10, loc="upper right")
+    ax1.grid(axis="both", alpha=0.2)
+    _annotate_direction(ax1, "\u2193 Lower is better", loc="upper left")
+
+    ax2.set_ylabel("Memory (MiB)")
+    ax2.set_xlabel("Elapsed Time (minutes)")
+    ax2.legend(fontsize=10, loc="upper right")
+    ax2.grid(axis="both", alpha=0.2)
+    _annotate_direction(ax2, "\u2193 Lower is better", loc="upper left")
+
+    fig.text(
+        0.5,
+        -0.02,
+        "Live CPU and memory usage captured every 5s via 'docker stats' across the entire benchmark run.\n"
+        "Each cluster of activity = one benchmark phase. Gaps = broker restart between tests.",
+        ha="center",
+        fontsize=8,
+        color="#888",
+        style="italic",
+    )
+
+    plt.tight_layout()
+    fig.savefig(CHARTS / "09_resource_timeline.png", bbox_inches="tight")
+    plt.close()
+    print("  -> 09_resource_timeline.png")
+
+
+# ── Chart 10: Resource Scaling Slope ─────────────────────────────────
+
+
+def chart_resource_scaling():
+    """Slope chart: throughput + peak memory vs CPU limit (dual Y-axis)."""
+    data = {}
+    for b in BROKERS:
+        d = load(f"{b}_scaling.json")
+        if d and isinstance(d, list):
+            data[b] = d
+
+    if not data:
+        return
+
+    fig, ax1 = plt.subplots(figsize=(12, 7))
+    ax2 = ax1.twinx()
+    fig.suptitle(
+        "Resource Scaling \u2014 Throughput vs CPU Limit",
+        fontweight="bold",
+        fontsize=14,
+    )
+
+    for b in BROKERS:
+        if b not in data:
+            continue
+
+        entries = data[b]
+        color = COLORS[b]
+        label = b.upper()
+
+        # Separate pass and fail entries
+        pass_entries = [e for e in entries if e.get("status") == "PASS"]
+        fail_entries = [e for e in entries if e.get("status") != "PASS"]
+
+        if pass_entries:
+            cpus = [e["cpu_limit"] for e in pass_entries]
+            throughputs = [e["throughput"] for e in pass_entries]
+            peak_mems = [e["peak_mem_mb"] for e in pass_entries]
+
+            ax1.plot(
+                cpus,
+                throughputs,
+                color=color,
+                marker="o",
+                linewidth=2.5,
+                label=f"{label} throughput (msg/s)",
+                markersize=9,
+            )
+            # Add data labels on throughput line
+            for xi, yi in zip(cpus, throughputs):
+                ax1.annotate(
+                    f"{yi:,.0f}",
+                    (xi, yi),
+                    textcoords="offset points",
+                    xytext=(0, 10),
+                    ha="center",
+                    fontsize=8,
+                    color=color,
+                    fontweight="bold",
+                )
+
+            ax2.plot(
+                cpus,
+                peak_mems,
+                color=color,
+                marker="s",
+                linewidth=1.5,
+                linestyle="--",
+                alpha=0.6,
+                label=f"{label} peak memory (MiB)",
+                markersize=7,
+            )
+
+        # Mark failures with red X
+        if fail_entries:
+            fail_cpus = [e["cpu_limit"] for e in fail_entries]
+            ax1.scatter(
+                fail_cpus,
+                [0] * len(fail_cpus),
+                color="#FF0000",
+                marker="x",
+                s=150,
+                linewidths=3,
+                zorder=10,
+                label=f"{label} FAIL",
+            )
+
+    ax1.set_xlabel(
+        "CPU Limit (cores) \u2014 higher = more resources available", fontsize=11
+    )
+    ax1.set_ylabel("Throughput (msg/s) \u2014 solid lines", fontsize=11)
+    ax2.set_ylabel("Peak Memory (MiB) \u2014 dashed lines", fontsize=11)
+
+    # Invert x-axis so highest CPU is on the left (degradation slope reads left-to-right)
+    ax1.invert_xaxis()
+
+    # Combine legends from both axes
+    lines1, labels1 = ax1.get_legend_handles_labels()
+    lines2, labels2 = ax2.get_legend_handles_labels()
+    ax1.legend(
+        lines1 + lines2,
+        labels1 + labels2,
+        loc="center right",
+        fontsize=10,
+        framealpha=0.8,
+        edgecolor="#555",
+    )
+
+    ax1.grid(axis="both", alpha=0.2)
+
+    fig.text(
+        0.5,
+        -0.03,
+        "Shows how throughput degrades as CPU is progressively restricted (left\u2192right = fewer CPUs).\n"
+        "The 'knee' where throughput drops sharply reveals each broker's minimum viable CPU.\n"
+        "Red X = broker failed to start or OOM'd at that CPU level.",
+        ha="center",
+        fontsize=8,
+        color="#888",
+        style="italic",
+    )
+
+    plt.tight_layout()
+    fig.savefig(CHARTS / "10_resource_scaling.png", bbox_inches="tight")
+    plt.close()
+    print("  -> 10_resource_scaling.png")
+
+
+# ── Chart 11: Disk I/O Over Time ─────────────────────────────────────
+
+
+def _parse_block_io(bio_str):
+    """Parse block I/O string like '12.3MB / 456kB' -> (read_mb, write_mb)."""
+    parts = bio_str.split("/")
+    if len(parts) != 2:
+        return 0.0, 0.0
+
+    def _to_mb(s):
+        s = s.strip()
+        if "GB" in s:
+            return float(s.replace("GB", "").strip()) * 1024
+        elif "MB" in s:
+            return float(s.replace("MB", "").strip())
+        elif "kB" in s:
+            return float(s.replace("kB", "").strip()) / 1024
+        elif "B" in s:
+            return float(s.replace("B", "").strip()) / (1024 * 1024)
+        return 0.0
+
+    return _to_mb(parts[0]), _to_mb(parts[1])
+
+
+def chart_disk_io_timeline():
+    """Time-series chart: disk read/write (block I/O) over time from docker_stats.csv."""
+    import csv
+
+    csv_path = RESULTS / "docker_stats.csv"
+    if not csv_path.exists():
+        return
+
+    container_data = {}
+    target_containers = {"bench-kafka", "bench-nats"}
+
+    with open(csv_path) as f:
+        reader = csv.reader(f)
+        header = next(reader, None)
+        if not header:
+            return
+        for row in reader:
+            if len(row) < 8:
+                continue
+            try:
+                ts = int(row[0])
+                container = row[1]
+                if container not in target_containers:
+                    continue
+                read_mb, write_mb = _parse_block_io(row[7])
+
+                if container not in container_data:
+                    container_data[container] = []
+                container_data[container].append((ts, read_mb, write_mb))
+            except (ValueError, IndexError):
+                continue
+
+    if not container_data:
+        return
+
+    all_ts = []
+    for points in container_data.values():
+        all_ts.extend(p[0] for p in points)
+    t0 = min(all_ts) if all_ts else 0
+
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(14, 8), sharex=True)
+    fig.suptitle(
+        "Disk I/O Over Time (from docker_stats.csv)", fontweight="bold", fontsize=14
+    )
+
+    container_colors = {"bench-kafka": KAFKA_COLOR, "bench-nats": NATS_COLOR}
+
+    for container, points in sorted(container_data.items()):
+        points.sort(key=lambda p: p[0])
+        color = container_colors.get(container, "#888")
+        label = container.replace("bench-", "").upper()
+
+        segments_t, segments_r, segments_w = [], [], []
+        seg_t, seg_r, seg_w = [], [], []
+
+        for i, (ts, rmb, wmb) in enumerate(points):
+            elapsed = (ts - t0) / 60.0
+            if seg_t and elapsed - seg_t[-1] > 0.5:
+                segments_t.append(seg_t)
+                segments_r.append(seg_r)
+                segments_w.append(seg_w)
+                seg_t, seg_r, seg_w = [], [], []
+            seg_t.append(elapsed)
+            seg_r.append(rmb)
+            seg_w.append(wmb)
+
+        if seg_t:
+            segments_t.append(seg_t)
+            segments_r.append(seg_r)
+            segments_w.append(seg_w)
+
+        for j, (st, sr, sw) in enumerate(zip(segments_t, segments_r, segments_w)):
+            lbl = label if j == 0 else None
+            ax1.plot(st, sr, color=color, label=lbl, linewidth=1.0, alpha=0.8)
+            ax1.fill_between(st, sr, alpha=0.1, color=color)
+            ax2.plot(st, sw, color=color, label=lbl, linewidth=1.0, alpha=0.8)
+            ax2.fill_between(st, sw, alpha=0.1, color=color)
+
+    ax1.set_ylabel("Cumulative Read (MB)")
+    ax1.set_title("Block I/O — Read")
+    ax1.legend(fontsize=10, loc="upper right")
+    ax1.grid(axis="both", alpha=0.2)
+
+    ax2.set_ylabel("Cumulative Write (MB)")
+    ax2.set_title("Block I/O — Write")
+    ax2.set_xlabel("Elapsed Time (minutes)")
+    ax2.legend(fontsize=10, loc="upper right")
+    ax2.grid(axis="both", alpha=0.2)
+
+    fig.text(
+        0.5,
+        -0.03,
+        "Cumulative disk read/write reported by Docker's block I/O accounting (cgroup blkio).\n"
+        "Shows how aggressively each broker hits disk — important for SSD wear and I/O-bound workloads.\n"
+        "Spikes correlate with benchmark phases (throughput, latency, memory stress).",
+        ha="center",
+        fontsize=8,
+        color="#888",
+        style="italic",
+    )
+
+    plt.tight_layout()
+    fig.savefig(CHARTS / "11_disk_io_timeline.png", bbox_inches="tight")
+    plt.close()
+    print("  -> 11_disk_io_timeline.png")
+
+
+# ── Chart 12: Throughput vs Resource Efficiency ──────────────────────
+
+
+def chart_throughput_vs_resources():
+    """Scatter/bar chart: throughput normalized by CPU and RAM usage."""
+    import csv
+
+    data = {}
+    for b in BROKERS:
+        # Get median throughput from runs
+        rates = []
+        for i in range(1, REPS + 1):
+            d = load(f"{b}_throughput_run{i}.json")
+            if d and "aggregate_rate" in d:
+                rates.append(d["aggregate_rate"])
+        if not rates:
+            continue
+        median_tp = sorted(rates)[len(rates) // 2]
+
+        # Get peak CPU and mem during throughput from scaling or stats
+        scaling = load(f"{b}_scaling.json")
+        peak_cpu = None
+        peak_mem = None
+        if scaling and isinstance(scaling, list):
+            # Use the entry closest to actual BENCH_CPUS
+            for entry in scaling:
+                if entry.get("status") == "PASS":
+                    peak_cpu = entry.get("peak_cpu_pct")
+                    peak_mem = entry.get("peak_mem_mb")
+                    break  # highest CPU limit first
+        if peak_cpu is None or peak_mem is None:
+            # Fallback: scan docker_stats.csv for peak values
+            csv_path = RESULTS / "docker_stats.csv"
+            if csv_path.exists():
+                container_name = f"bench-{b}"
+                max_cpu, max_mem = 0, 0
+                with open(csv_path) as f:
+                    reader = csv.reader(f)
+                    next(reader, None)
+                    for row in reader:
+                        if len(row) < 5 or row[1] != container_name:
+                            continue
+                        try:
+                            cpu = float(row[2].replace("%", ""))
+                            mem = _parse_mem_usage(row[3])
+                            max_cpu = max(max_cpu, cpu)
+                            max_mem = max(max_mem, mem)
+                        except (ValueError, IndexError):
+                            continue
+                if max_cpu > 0:
+                    peak_cpu = max_cpu
+                if max_mem > 0:
+                    peak_mem = max_mem
+
+        if peak_cpu and peak_mem and peak_cpu > 0 and peak_mem > 0:
+            data[b] = {
+                "throughput": median_tp,
+                "peak_cpu": peak_cpu,
+                "peak_mem": peak_mem,
+                "tp_per_cpu_pct": median_tp
+                / (peak_cpu / 100),  # msgs/s per CPU core (approx)
+                "tp_per_gb_ram": median_tp / (peak_mem / 1024),  # msgs/s per GB RAM
+            }
+
+    if not data:
+        return
+
+    fig, axes = plt.subplots(1, 3, figsize=(18, 5))
+    fig.suptitle(
+        "Resource Efficiency — Throughput vs Resources", fontweight="bold", fontsize=14
+    )
+
+    brokers = list(data.keys())
+    colors = [COLORS[b] for b in brokers]
+    labels = [b.upper() for b in brokers]
+
+    # Panel 1: Raw throughput vs peak CPU
+    ax = axes[0]
+    for i, b in enumerate(brokers):
+        ax.bar(i, data[b]["throughput"], color=colors[i], width=0.5)
+        ax.text(
+            i,
+            data[b]["throughput"],
+            f"{data[b]['throughput']:,.0f}\n({data[b]['peak_cpu']:.0f}% CPU)",
+            ha="center",
+            va="bottom",
+            fontsize=9,
+            fontweight="bold",
+        )
+    ax.set_xticks(range(len(brokers)))
+    ax.set_xticklabels(labels)
+    ax.set_ylabel("Messages / sec")
+    ax.set_title("Throughput (annotated with peak CPU%)")
+    _annotate_direction(ax, "\u2191 Higher is better")
+
+    # Panel 2: Throughput per CPU core
+    ax = axes[1]
+    vals = [data[b]["tp_per_cpu_pct"] for b in brokers]
+    for i, (v, b) in enumerate(zip(vals, brokers)):
+        ax.bar(i, v, color=colors[i], width=0.5)
+        ax.text(
+            i, v, f"{v:,.0f}", ha="center", va="bottom", fontsize=9, fontweight="bold"
+        )
+    ax.set_xticks(range(len(brokers)))
+    ax.set_xticklabels(labels)
+    ax.set_ylabel("Messages / sec / CPU core")
+    ax.set_title("Throughput per CPU Core")
+    _annotate_direction(ax, "\u2191 Higher is better")
+
+    # Panel 3: Throughput per GB RAM
+    ax = axes[2]
+    vals = [data[b]["tp_per_gb_ram"] for b in brokers]
+    for i, (v, b) in enumerate(zip(vals, brokers)):
+        ax.bar(i, v, color=colors[i], width=0.5)
+        ax.text(
+            i, v, f"{v:,.0f}", ha="center", va="bottom", fontsize=9, fontweight="bold"
+        )
+    ax.set_xticks(range(len(brokers)))
+    ax.set_xticklabels(labels)
+    ax.set_ylabel("Messages / sec / GB RAM")
+    ax.set_title("Throughput per GB RAM")
+    _annotate_direction(ax, "\u2191 Higher is better")
+
+    fig.text(
+        0.5,
+        -0.04,
+        "Resource efficiency = how much throughput you get per unit of CPU and memory consumed.\n"
+        "Higher = broker extracts more performance from the same hardware budget.\n"
+        "Left: raw throughput with peak CPU annotation. Center: msgs/s per CPU core. Right: msgs/s per GB RAM.",
+        ha="center",
+        fontsize=8,
+        color="#888",
+        style="italic",
+    )
+
+    plt.tight_layout()
+    fig.savefig(CHARTS / "12_throughput_vs_resources.png", bbox_inches="tight")
+    plt.close()
+    print("  -> 12_throughput_vs_resources.png")
 
 
 # ── Cross-Scenario Comparison Charts ──────────────────────────────────
@@ -576,7 +1690,7 @@ def compare_throughput(scenarios, out_dir):
         data[sc] = {}
         for b in BROKERS:
             rates = []
-            for i in range(1, 4):
+            for i in range(1, REPS + 1):
                 d = _load_scenario(sc, f"{b}_throughput_run{i}.json")
                 if d and "aggregate_rate" in d:
                     rates.append(d["aggregate_rate"])
@@ -615,7 +1729,20 @@ def compare_throughput(scenarios, out_dir):
     ax.set_xticklabels([s.upper() for s in scenarios])
     ax.set_xlabel("Hardware Scenario")
     ax.legend()
-    plt.tight_layout()
+
+    # Annotation: explain Python client throughput measures client library, not broker
+    ax.annotate(
+        "Note: Measures Python client library throughput, not raw broker capacity.\n"
+        "Kafka's librdkafka buffers async; nats-py awaits each ack. See CLI chart for broker comparison.",
+        xy=(0.5, 0.01),
+        xycoords="figure fraction",
+        ha="center",
+        fontsize=7.5,
+        fontstyle="italic",
+        color="#888888",
+    )
+
+    plt.tight_layout(rect=[0, 0.06, 1, 1])
     fig.savefig(out_dir / "cmp_03_throughput.png", bbox_inches="tight")
     plt.close()
     print("  -> cmp_03_throughput.png")
@@ -660,6 +1787,18 @@ def compare_cli_throughput(scenarios, out_dir):
     ax.set_xticklabels([s.upper() for s in scenarios])
     ax.set_xlabel("Hardware Scenario")
     ax.legend()
+    _annotate_direction(ax, "\u2191 Higher is better")
+
+    fig.text(
+        0.5,
+        -0.02,
+        "CLI producer throughput (kcat / nats bench) across hardware profiles. Reflects raw broker capacity.",
+        ha="center",
+        fontsize=8,
+        color="#888",
+        style="italic",
+    )
+
     plt.tight_layout()
     fig.savefig(out_dir / "cmp_04_cli_throughput.png", bbox_inches="tight")
     plt.close()
@@ -792,6 +1931,560 @@ def compare_memory_stress(scenarios, out_dir):
     print("  -> cmp_06_memory_stress.png")
 
 
+def compare_consumer_throughput(scenarios, out_dir):
+    """Grouped bar: consumer throughput (Python + CLI) across scenarios."""
+    py_data = {}
+    cli_data = {}
+    for sc in scenarios:
+        py_data[sc] = {}
+        cli_data[sc] = {}
+        for b in BROKERS:
+            # Python client
+            rates = []
+            for i in range(1, REPS + 1):
+                d = _load_scenario(sc, f"{b}_consumer_run{i}.json")
+                if d and "aggregate_rate" in d:
+                    rates.append(d["aggregate_rate"])
+            if rates:
+                py_data[sc][b] = sorted(rates)[len(rates) // 2]
+            # CLI
+            d = _load_scenario(sc, f"{b}_cli_consumer.json")
+            if d and "msgs_per_sec" in d:
+                cli_data[sc][b] = d["msgs_per_sec"]
+
+    if not any(py_data[sc] or cli_data[sc] for sc in scenarios):
+        return
+
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 5))
+    fig.suptitle(
+        "Consumer Throughput \u2014 Cross-Scenario Comparison (Python + CLI)",
+        fontweight="bold",
+    )
+
+    # Left: Python Client
+    x = np.arange(len(scenarios))
+    w = 0.3
+    for i, b in enumerate(BROKERS):
+        vals = [py_data[sc].get(b, 0) for sc in scenarios]
+        offset = (i - 0.5) * w
+        bars = ax1.bar(x + offset, vals, w, label=b.upper(), color=COLORS[b])
+        for bar, v in zip(bars, vals):
+            if v > 0:
+                ax1.text(
+                    bar.get_x() + bar.get_width() / 2,
+                    bar.get_height(),
+                    f"{v:,.0f}",
+                    ha="center",
+                    va="bottom",
+                    fontsize=8,
+                    fontweight="bold",
+                )
+    ax1.set_ylabel("Messages / sec")
+    ax1.set_title("Python Client")
+    ax1.set_xticks(x)
+    ax1.set_xticklabels([s.upper() for s in scenarios])
+    ax1.set_xlabel("Hardware Scenario")
+    ax1.legend(fontsize=9)
+    _annotate_direction(ax1, "\u2191 Higher is better")
+
+    # Right: CLI
+    for i, b in enumerate(BROKERS):
+        vals = [cli_data[sc].get(b, 0) for sc in scenarios]
+        offset = (i - 0.5) * w
+        bars = ax2.bar(x + offset, vals, w, label=b.upper(), color=COLORS[b])
+        for bar, v in zip(bars, vals):
+            if v > 0:
+                ax2.text(
+                    bar.get_x() + bar.get_width() / 2,
+                    bar.get_height(),
+                    f"{v:,.0f}",
+                    ha="center",
+                    va="bottom",
+                    fontsize=8,
+                    fontweight="bold",
+                )
+    ax2.set_ylabel("Messages / sec")
+    ax2.set_title("CLI (kcat / nats bench)")
+    ax2.set_xticks(x)
+    ax2.set_xticklabels([s.upper() for s in scenarios])
+    ax2.set_xlabel("Hardware Scenario")
+    ax2.legend(fontsize=9)
+    _annotate_direction(ax2, "\u2191 Higher is better")
+
+    fig.text(
+        0.5,
+        -0.02,
+        "Consumer throughput comparison across hardware profiles. Left = Python client library, Right = native CLI tools.",
+        ha="center",
+        fontsize=8,
+        color="#888",
+        style="italic",
+    )
+
+    plt.tight_layout()
+    fig.savefig(out_dir / "cmp_07_consumer.png", bbox_inches="tight")
+    plt.close()
+    print("  -> cmp_07_consumer.png")
+
+
+def compare_prodcon(scenarios, out_dir):
+    """Grouped bar: prodcon rates (Python + CLI) across scenarios."""
+    py_data = {}
+    cli_data = {}
+    for sc in scenarios:
+        py_data[sc] = {}
+        cli_data[sc] = {}
+        for b in BROKERS:
+            d = _load_scenario(sc, f"{b}_prodcon.json")
+            if d and "producer" in d and "consumer" in d:
+                py_data[sc][b] = d
+            d = _load_scenario(sc, f"{b}_cli_prodcon.json")
+            if d:
+                cli_data[sc][b] = d
+
+    if not any(py_data[sc] or cli_data[sc] for sc in scenarios):
+        return
+
+    fig, axes = plt.subplots(2, 2, figsize=(16, 10))
+    fig.suptitle(
+        "Simultaneous ProdCon \u2014 Cross-Scenario (Python + CLI)",
+        fontweight="bold",
+        fontsize=14,
+    )
+
+    titles = [
+        ("Python Client \u2014 Producer Rate", "producer", "aggregate_rate", py_data),
+        ("Python Client \u2014 Consumer Rate", "consumer", "aggregate_rate", py_data),
+        ("CLI \u2014 Producer Rate", None, "producer_msgs_per_sec", cli_data),
+        ("CLI \u2014 Consumer Rate", None, "consumer_msgs_per_sec", cli_data),
+    ]
+
+    for ax, (title, metric_key, rate_key, src) in zip(axes.flat, titles):
+        x = np.arange(len(scenarios))
+        w = 0.3
+        for i, b in enumerate(BROKERS):
+            if metric_key:
+                vals = [
+                    src[sc].get(b, {}).get(metric_key, {}).get(rate_key, 0)
+                    for sc in scenarios
+                ]
+            else:
+                vals = [src[sc].get(b, {}).get(rate_key, 0) for sc in scenarios]
+            offset = (i - 0.5) * w
+            bars = ax.bar(x + offset, vals, w, label=b.upper(), color=COLORS[b])
+            for bar, v in zip(bars, vals):
+                if v > 0:
+                    ax.text(
+                        bar.get_x() + bar.get_width() / 2,
+                        bar.get_height(),
+                        f"{v:,.0f}",
+                        ha="center",
+                        va="bottom",
+                        fontsize=8,
+                        fontweight="bold",
+                    )
+        ax.set_ylabel("Messages / sec")
+        ax.set_title(title, fontsize=11)
+        ax.set_xticks(x)
+        ax.set_xticklabels([s.upper() for s in scenarios])
+        ax.legend(fontsize=9)
+        _annotate_direction(ax, "\u2191 Higher is better")
+
+    fig.text(
+        0.5,
+        -0.01,
+        "Simultaneous producer+consumer load across hardware profiles. Top = Python client, Bottom = CLI tools.",
+        ha="center",
+        fontsize=8,
+        color="#888",
+        style="italic",
+    )
+
+    plt.tight_layout()
+    fig.savefig(out_dir / "cmp_08_prodcon.png", bbox_inches="tight")
+    plt.close()
+    print("  -> cmp_08_prodcon.png")
+
+
+def compare_resource_scaling(scenarios, out_dir):
+    """Scaling slopes per scenario — one subplot per broker."""
+    data = {}
+    for sc in scenarios:
+        data[sc] = {}
+        for b in BROKERS:
+            d = _load_scenario(sc, f"{b}_scaling.json")
+            if d and isinstance(d, list):
+                data[sc][b] = d
+
+    if not any(data[sc] for sc in scenarios):
+        return
+
+    fig, axes = plt.subplots(1, len(BROKERS), figsize=(14, 5), sharey=True)
+    fig.suptitle(
+        "Resource Scaling Slope — Cross-Scenario Comparison", fontweight="bold"
+    )
+
+    for ax, b in zip(axes, BROKERS):
+        ax.set_title(b.upper(), fontweight="bold")
+        for sc in scenarios:
+            entries = data[sc].get(b, [])
+            pass_entries = [e for e in entries if e.get("status") == "PASS"]
+            if pass_entries:
+                cpus = [e["cpu_limit"] for e in pass_entries]
+                tps = [e["throughput"] for e in pass_entries]
+                ax.plot(
+                    cpus,
+                    tps,
+                    marker="o",
+                    linewidth=2,
+                    label=sc.upper(),
+                    color=SCENARIO_COLORS.get(sc, "#888"),
+                    markersize=6,
+                )
+            fail_entries = [e for e in entries if e.get("status") != "PASS"]
+            if fail_entries:
+                fail_cpus = [e["cpu_limit"] for e in fail_entries]
+                ax.scatter(
+                    fail_cpus,
+                    [0] * len(fail_cpus),
+                    color=SCENARIO_COLORS.get(sc, "#888"),
+                    marker="x",
+                    s=80,
+                    linewidths=2,
+                    zorder=10,
+                )
+        ax.invert_xaxis()
+        ax.set_xlabel("CPU Limit (cores)")
+        ax.set_ylabel("Throughput (msg/s)" if b == BROKERS[0] else "")
+        ax.legend(fontsize=8)
+        ax.grid(axis="y", alpha=0.3)
+        _annotate_direction(ax, "\u2191 Higher is better")
+
+    fig.text(
+        0.5,
+        -0.03,
+        "How throughput degrades as CPU allocation is reduced (left\u2192right = fewer CPUs).\n"
+        "Each line = one hardware scenario. The slope reveals how sensitive each broker is to CPU starvation.\n"
+        "Flat lines = broker is not CPU-bound at these levels. Steep drops = broker hits a CPU bottleneck.\n"
+        "Red X = broker failed to start or crashed (OOM / timeout) at that CPU level.",
+        ha="center",
+        fontsize=8,
+        color="#888",
+        style="italic",
+    )
+
+    plt.tight_layout()
+    fig.savefig(out_dir / "cmp_09_resource_scaling.png", bbox_inches="tight")
+    plt.close()
+    print("  -> cmp_09_resource_scaling.png")
+
+
+def _load_scenario_csv(scenario_name):
+    """Load docker_stats.csv from a specific scenario's results dir."""
+    import csv
+
+    p = _project_root / "results" / scenario_name / "docker_stats.csv"
+    if not p.exists():
+        return {}
+
+    container_data = {}
+    target_containers = {"bench-kafka", "bench-nats"}
+
+    with open(p) as f:
+        reader = csv.reader(f)
+        header = next(reader, None)
+        if not header:
+            return {}
+        for row in reader:
+            if len(row) < 8:
+                continue
+            try:
+                ts = int(row[0])
+                container = row[1]
+                if container not in target_containers:
+                    continue
+                cpu = float(row[2].replace("%", ""))
+                mem_mb = _parse_mem_usage(row[3])
+                read_mb, write_mb = _parse_block_io(row[7])
+
+                if container not in container_data:
+                    container_data[container] = []
+                container_data[container].append((ts, cpu, mem_mb, read_mb, write_mb))
+            except (ValueError, IndexError):
+                continue
+
+    return container_data
+
+
+def compare_resource_timeline(scenarios, out_dir):
+    """Cross-scenario comparison: CPU%, RAM, disk I/O over time — one row per scenario."""
+    all_data = {}
+    for sc in scenarios:
+        all_data[sc] = _load_scenario_csv(sc)
+
+    if not any(all_data[sc] for sc in scenarios):
+        return
+
+    n_scenarios = len(scenarios)
+    fig, axes = plt.subplots(
+        n_scenarios, 3, figsize=(20, 5 * n_scenarios), squeeze=False
+    )
+    fig.suptitle(
+        "Resource Usage Over Time — Cross-Scenario Comparison",
+        fontweight="bold",
+        fontsize=16,
+        y=1.01,
+    )
+
+    container_colors = {"bench-kafka": KAFKA_COLOR, "bench-nats": NATS_COLOR}
+    col_titles = ["CPU %", "Memory (MiB)", "Disk Write (MB)"]
+
+    for row_idx, sc in enumerate(scenarios):
+        cdata = all_data[sc]
+        if not cdata:
+            for col_idx in range(3):
+                axes[row_idx][col_idx].text(
+                    0.5,
+                    0.5,
+                    "No data",
+                    ha="center",
+                    va="center",
+                    fontsize=12,
+                    color="#888",
+                )
+            continue
+
+        all_ts = []
+        for points in cdata.values():
+            all_ts.extend(p[0] for p in points)
+        t0 = min(all_ts) if all_ts else 0
+
+        for container, points in sorted(cdata.items()):
+            points.sort(key=lambda p: p[0])
+            color = container_colors.get(container, "#888")
+            label = container.replace("bench-", "").upper()
+
+            # Break at gaps > 30s
+            segments = []
+            seg = []
+            for pt in points:
+                elapsed = (pt[0] - t0) / 60.0
+                if seg and elapsed - seg[-1][0] > 0.5:
+                    segments.append(seg)
+                    seg = []
+                seg.append((elapsed, pt[1], pt[2], pt[3], pt[4]))
+            if seg:
+                segments.append(seg)
+
+            for j, seg in enumerate(segments):
+                lbl = label if j == 0 else None
+                t = [s[0] for s in seg]
+                # CPU
+                axes[row_idx][0].plot(
+                    t,
+                    [s[1] for s in seg],
+                    color=color,
+                    label=lbl,
+                    linewidth=1.0,
+                    alpha=0.8,
+                )
+                axes[row_idx][0].fill_between(
+                    t, [s[1] for s in seg], alpha=0.08, color=color
+                )
+                # Memory
+                axes[row_idx][1].plot(
+                    t,
+                    [s[2] for s in seg],
+                    color=color,
+                    label=lbl,
+                    linewidth=1.0,
+                    alpha=0.8,
+                )
+                axes[row_idx][1].fill_between(
+                    t, [s[2] for s in seg], alpha=0.08, color=color
+                )
+                # Disk Write
+                axes[row_idx][2].plot(
+                    t,
+                    [s[4] for s in seg],
+                    color=color,
+                    label=lbl,
+                    linewidth=1.0,
+                    alpha=0.8,
+                )
+                axes[row_idx][2].fill_between(
+                    t, [s[4] for s in seg], alpha=0.08, color=color
+                )
+
+        for col_idx in range(3):
+            ax = axes[row_idx][col_idx]
+            if row_idx == 0:
+                ax.set_title(col_titles[col_idx], fontsize=12, fontweight="bold")
+            ax.set_ylabel(f"{sc.upper()}", fontsize=10, fontweight="bold")
+            ax.legend(fontsize=8, loc="upper right")
+            ax.grid(axis="both", alpha=0.2)
+            if row_idx == n_scenarios - 1:
+                ax.set_xlabel("Elapsed Time (minutes)")
+
+    fig.text(
+        0.5,
+        -0.02,
+        "Side-by-side resource consumption across hardware scenarios.\n"
+        "Each row = one scenario (different CPU/RAM allocations). Columns = CPU, Memory, Disk write.\n"
+        "Compare how each broker's resource appetite changes with available hardware.",
+        ha="center",
+        fontsize=8,
+        color="#888",
+        style="italic",
+    )
+
+    plt.tight_layout()
+    fig.savefig(out_dir / "cmp_10_resource_timeline.png", bbox_inches="tight")
+    plt.close()
+    print("  -> cmp_10_resource_timeline.png")
+
+
+def compare_throughput_vs_resources(scenarios, out_dir):
+    """Cross-scenario: throughput efficiency (msgs/s per CPU core and per GB RAM)."""
+    import csv
+
+    data = {}  # {scenario: {broker: {throughput, peak_cpu, peak_mem, ...}}}
+    for sc in scenarios:
+        data[sc] = {}
+        for b in BROKERS:
+            rates = []
+            for i in range(1, REPS + 1):
+                d = _load_scenario(sc, f"{b}_throughput_run{i}.json")
+                if d and "aggregate_rate" in d:
+                    rates.append(d["aggregate_rate"])
+            if not rates:
+                continue
+            median_tp = sorted(rates)[len(rates) // 2]
+
+            # Try scaling data first
+            peak_cpu, peak_mem = None, None
+            scaling = _load_scenario(sc, f"{b}_scaling.json")
+            if scaling and isinstance(scaling, list):
+                for entry in scaling:
+                    if entry.get("status") == "PASS":
+                        peak_cpu = entry.get("peak_cpu_pct")
+                        peak_mem = entry.get("peak_mem_mb")
+                        break
+
+            # Fallback to docker_stats.csv
+            if peak_cpu is None or peak_mem is None:
+                csv_path = _project_root / "results" / sc / "docker_stats.csv"
+                if csv_path.exists():
+                    container_name = f"bench-{b}"
+                    max_cpu, max_mem = 0, 0
+                    with open(csv_path) as f:
+                        reader = csv.reader(f)
+                        next(reader, None)
+                        for row in reader:
+                            if len(row) < 5 or row[1] != container_name:
+                                continue
+                            try:
+                                cpu_val = float(row[2].replace("%", ""))
+                                mem_val = _parse_mem_usage(row[3])
+                                max_cpu = max(max_cpu, cpu_val)
+                                max_mem = max(max_mem, mem_val)
+                            except (ValueError, IndexError):
+                                continue
+                    if max_cpu > 0:
+                        peak_cpu = max_cpu
+                    if max_mem > 0:
+                        peak_mem = max_mem
+
+            if peak_cpu and peak_mem and peak_cpu > 0 and peak_mem > 0:
+                data[sc][b] = {
+                    "throughput": median_tp,
+                    "peak_cpu": peak_cpu,
+                    "peak_mem": peak_mem,
+                    "tp_per_cpu": median_tp / (peak_cpu / 100),
+                    "tp_per_gb": median_tp / (peak_mem / 1024),
+                }
+
+    if not any(data[sc] for sc in scenarios):
+        return
+
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 6))
+    fig.suptitle(
+        "Resource Efficiency — Cross-Scenario Comparison",
+        fontweight="bold",
+        fontsize=14,
+    )
+
+    x = np.arange(len(scenarios))
+    w = 0.3
+
+    # Left: Throughput per CPU core
+    for i, b in enumerate(BROKERS):
+        vals = [data[sc].get(b, {}).get("tp_per_cpu", 0) for sc in scenarios]
+        offset = (i - 0.5) * w
+        bars = ax1.bar(x + offset, vals, w, label=b.upper(), color=COLORS[b])
+        for bar, v in zip(bars, vals):
+            if v > 0:
+                ax1.text(
+                    bar.get_x() + bar.get_width() / 2,
+                    bar.get_height(),
+                    f"{v:,.0f}",
+                    ha="center",
+                    va="bottom",
+                    fontsize=8,
+                    fontweight="bold",
+                )
+
+    ax1.set_ylabel("Messages / sec / CPU core")
+    ax1.set_title("Throughput per CPU Core")
+    ax1.set_xticks(x)
+    ax1.set_xticklabels([s.upper() for s in scenarios])
+    ax1.set_xlabel("Hardware Scenario")
+    ax1.legend()
+    _annotate_direction(ax1, "\u2191 Higher is better")
+
+    # Right: Throughput per GB RAM
+    for i, b in enumerate(BROKERS):
+        vals = [data[sc].get(b, {}).get("tp_per_gb", 0) for sc in scenarios]
+        offset = (i - 0.5) * w
+        bars = ax2.bar(x + offset, vals, w, label=b.upper(), color=COLORS[b])
+        for bar, v in zip(bars, vals):
+            if v > 0:
+                ax2.text(
+                    bar.get_x() + bar.get_width() / 2,
+                    bar.get_height(),
+                    f"{v:,.0f}",
+                    ha="center",
+                    va="bottom",
+                    fontsize=8,
+                    fontweight="bold",
+                )
+
+    ax2.set_ylabel("Messages / sec / GB RAM")
+    ax2.set_title("Throughput per GB RAM")
+    ax2.set_xticks(x)
+    ax2.set_xticklabels([s.upper() for s in scenarios])
+    ax2.set_xlabel("Hardware Scenario")
+    ax2.legend()
+    _annotate_direction(ax2, "\u2191 Higher is better")
+
+    fig.text(
+        0.5,
+        -0.03,
+        "Resource efficiency = throughput normalized by peak resource consumption.\n"
+        "Higher = broker squeezes more performance from the same hardware.\n"
+        "Compares how efficiency changes across hardware profiles (more resources doesn't always mean proportional gains).",
+        ha="center",
+        fontsize=8,
+        color="#888",
+        style="italic",
+    )
+
+    plt.tight_layout()
+    fig.savefig(out_dir / "cmp_11_throughput_vs_resources.png", bbox_inches="tight")
+    plt.close()
+    print("  -> cmp_11_throughput_vs_resources.png")
+
+
 def create_mega_image(scenarios, out_dir):
     """Combine all comparison PNGs into a single mega-image."""
     from PIL import Image
@@ -871,6 +2564,11 @@ def run_compare(scenarios):
     compare_cli_throughput(scenarios, out_dir)
     compare_latency(scenarios, out_dir)
     compare_memory_stress(scenarios, out_dir)
+    compare_consumer_throughput(scenarios, out_dir)
+    compare_prodcon(scenarios, out_dir)
+    compare_resource_scaling(scenarios, out_dir)
+    compare_resource_timeline(scenarios, out_dir)
+    compare_throughput_vs_resources(scenarios, out_dir)
     create_mega_image(scenarios, out_dir)
 
     print(f"\nComparison charts saved to {out_dir}/")
@@ -899,9 +2597,16 @@ def main():
     chart_idle()
     chart_startup()
     chart_throughput()
+    chart_cli_throughput()
     chart_latency()
     chart_memory_stress()
     chart_scorecard()
+    chart_consumer_throughput()
+    chart_prodcon()
+    chart_resource_timeline()
+    chart_resource_scaling()
+    chart_disk_io_timeline()
+    chart_throughput_vs_resources()
 
     print(f"\nAll charts saved to {CHARTS}/")
 

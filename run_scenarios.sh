@@ -73,6 +73,8 @@ while [[ $# -gt 0 ]]; do
         echo "  ${name}      ${cpus}    ${mem}"
       done
       exit 0 ;;
+    --rerun|--duration|--reps|--idle-wait|--producers|--memory|--results-dir)
+      FORWARD_ARGS+=("$1" "$2"); shift 2 ;;
     *)
       FORWARD_ARGS+=("$1"); shift ;;
   esac
