@@ -30,6 +30,80 @@ log "========================================"
 METRICS_PID=$!
 trap "kill $METRICS_PID 2>/dev/null || true" EXIT
 
+# Resolve kcat binary (newer distros ship "kcat", older ones ship "kafkacat")
+KCAT=""
+if command -v kcat &>/dev/null; then
+  KCAT="kcat"
+elif command -v kafkacat &>/dev/null; then
+  KCAT="kafkacat"
+fi
+
+CLI_TOTAL_MESSAGES="${CLI_TOTAL_MESSAGES:-500000}"
+
+# ── CLI throughput helpers (run on host, not in container) ────────────────────
+
+_cli_throughput_kafka() {
+  # Returns msgs/sec via kcat producer
+  if [[ -z "$KCAT" ]]; then echo "0"; return; fi
+
+  # Create topic
+  docker exec bench-kafka kafka-topics --bootstrap-server localhost:9092 \
+    --create --topic bench-scaling-cli --partitions 1 --replication-factor 1 \
+    --config min.insync.replicas=1 >/dev/null 2>&1 || true
+
+  local payload
+  payload=$(head -c "$PAYLOAD_BYTES" /dev/urandom | base64 | tr -d '\n' | head -c "$PAYLOAD_BYTES")
+
+  local start_ns end_ns elapsed_ms
+  start_ns=$(date +%s%N)
+
+  ( set +o pipefail
+    yes "$payload" | head -n "$CLI_TOTAL_MESSAGES" | \
+      timeout 300 "$KCAT" -P -b localhost:9092 -t bench-scaling-cli \
+        -X acks=all \
+        -X queue.buffering.max.messages=100000 \
+        -X queue.buffering.max.kbytes=524288 \
+        -X batch.num.messages=10000 \
+        -X linger.ms=5
+  )
+
+  end_ns=$(date +%s%N)
+  elapsed_ms=$(( (end_ns - start_ns) / 1000000 ))
+  uv run python3 -c "print(f'{$CLI_TOTAL_MESSAGES / ($elapsed_ms / 1000):.1f}')" 2>/dev/null || echo "0"
+
+  # Clean up topic for next iteration
+  docker exec bench-kafka kafka-topics --bootstrap-server localhost:9092 \
+    --delete --topic bench-scaling-cli >/dev/null 2>&1 || true
+}
+
+_cli_throughput_nats() {
+  # Returns msgs/sec via nats bench
+  if ! command -v nats &>/dev/null; then echo "0"; return; fi
+
+  # Delete the Python producer's stream to free storage quota
+  nats stream delete BENCH --server="nats://localhost:4222" -f >/dev/null 2>&1 || true
+
+  local raw
+  raw=$(nats bench js pub async scaling.cli.bench \
+    --server="nats://localhost:4222" \
+    --create --storage=file --purge \
+    --stream="BENCH-SCALING-CLI" \
+    --maxbytes="1GB" \
+    --clients "$NUM_PRODUCERS" \
+    --size "$PAYLOAD_BYTES" \
+    --msgs "$CLI_TOTAL_MESSAGES" \
+    --no-progress 2>&1) || true
+
+  local msgs_sec
+  msgs_sec=$(echo "$raw" | grep -i "aggregated stats" | grep -oE '[0-9,]+ msgs/sec' | tr -d ',' | cut -d' ' -f1)
+  if [[ -z "$msgs_sec" ]]; then
+    msgs_sec=$(echo "$raw" | grep -oE '[0-9,]+ msgs/sec' | tail -1 | tr -d ',' | cut -d' ' -f1)
+  fi
+  echo "${msgs_sec:-0}"
+}
+
+# ── Main scaling loop ────────────────────────────────────────────────────────
+
 run_scaling() {
   local broker_name="$1" compose="$2" producer="$3"
   local tmp_json
@@ -47,6 +121,7 @@ run_scaling() {
 
     local status="PASS"
     local throughput=0
+    local cli_throughput=0
     local peak_cpu=0
     local peak_mem_mb=0
 
@@ -81,13 +156,20 @@ run_scaling() {
       ) &
       local stats_pid=$!
 
-      # Run producer benchmark
+      # Run Python client producer benchmark
       local run_output
       if run_output=$(uv run python3 "$producer" 2>/dev/null); then
         throughput=$(echo "$run_output" | uv run python3 -c "import sys,json; print(json.load(sys.stdin).get('aggregate_rate', 0))" 2>/dev/null || echo "0")
       else
         log_warn "  Producer failed at CPU=$cpu_level"
         status="FAIL_WORKLOAD"
+      fi
+
+      # Run CLI-native throughput (host-side, no Python overhead)
+      if [[ "$status" == "PASS" ]]; then
+        log "    Running CLI throughput at CPU=$cpu_level ..."
+        cli_throughput=$(_cli_throughput_${broker_name})
+        log "    CLI: ${cli_throughput} msg/s"
       fi
 
       # Stop stats collection
@@ -131,6 +213,7 @@ data = json.load(open('$tmp_json'))
 data.append({
     'cpu_limit': $cpu_level,
     'throughput': $throughput,
+    'cli_throughput': $cli_throughput,
     'peak_cpu_pct': $peak_cpu,
     'peak_mem_mb': $peak_mem_mb,
     'status': '$status'
@@ -140,7 +223,7 @@ with open('$tmp_json', 'w') as f:
 "
 
     if [[ "$status" == "PASS" ]]; then
-      log_ok "  CPU=$cpu_level → ${throughput} msg/s | peak CPU=${peak_cpu}% | peak mem=${peak_mem_mb}MB"
+      log_ok "  CPU=$cpu_level → Python: ${throughput} msg/s | CLI: ${cli_throughput} msg/s | peak CPU=${peak_cpu}% | peak mem=${peak_mem_mb}MB"
     else
       log_warn "  CPU=$cpu_level → $status"
     fi

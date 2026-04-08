@@ -419,25 +419,29 @@ TABLE
   echo "" >> "$out"
   echo "### Kafka" >> "$out"
   echo "" >> "$out"
-  echo "| CPU Limit | Throughput (msg/s) | Peak CPU % | Peak Mem (MB) | Status |" >> "$out"
-  echo "|-----------|-------------------|------------|---------------|--------|" >> "$out"
+  echo "| CPU Limit | Python (msg/s) | CLI (msg/s) | Peak CPU % | Peak Mem (MB) | Status |" >> "$out"
+  echo "|-----------|---------------|-------------|------------|---------------|--------|" >> "$out"
   python3 -c "
 import json
 d = json.load(open('$report'))
 for r in d['resource_scaling']['kafka']:
-    print(f'| {r[\"cpu_limit\"]} | {r[\"throughput\"]:,.1f} | {r[\"peak_cpu_pct\"]:.1f} | {r[\"peak_mem_mb\"]:.1f} | {r[\"status\"]} |')
+    cli = r.get('cli_throughput', 0)
+    cli_s = f'{cli:,.1f}' if cli else '—'
+    print(f'| {r[\"cpu_limit\"]} | {r[\"throughput\"]:,.1f} | {cli_s} | {r[\"peak_cpu_pct\"]:.1f} | {r[\"peak_mem_mb\"]:.1f} | {r[\"status\"]} |')
 " 2>/dev/null >> "$out"
 
   echo "" >> "$out"
   echo "### NATS" >> "$out"
   echo "" >> "$out"
-  echo "| CPU Limit | Throughput (msg/s) | Peak CPU % | Peak Mem (MB) | Status |" >> "$out"
-  echo "|-----------|-------------------|------------|---------------|--------|" >> "$out"
+  echo "| CPU Limit | Python (msg/s) | CLI (msg/s) | Peak CPU % | Peak Mem (MB) | Status |" >> "$out"
+  echo "|-----------|---------------|-------------|------------|---------------|--------|" >> "$out"
   python3 -c "
 import json
 d = json.load(open('$report'))
 for r in d['resource_scaling']['nats']:
-    print(f'| {r[\"cpu_limit\"]} | {r[\"throughput\"]:,.1f} | {r[\"peak_cpu_pct\"]:.1f} | {r[\"peak_mem_mb\"]:.1f} | {r[\"status\"]} |')
+    cli = r.get('cli_throughput', 0)
+    cli_s = f'{cli:,.1f}' if cli else '—'
+    print(f'| {r[\"cpu_limit\"]} | {r[\"throughput\"]:,.1f} | {cli_s} | {r[\"peak_cpu_pct\"]:.1f} | {r[\"peak_mem_mb\"]:.1f} | {r[\"status\"]} |')
 " 2>/dev/null >> "$out"
   echo "" >> "$out"
 

@@ -1171,7 +1171,7 @@ def chart_resource_timeline():
 
 
 def chart_resource_scaling():
-    """Slope chart: throughput + peak memory vs CPU limit (dual Y-axis)."""
+    """Slope chart: Python + CLI throughput vs CPU limit (dual Y-axis for memory)."""
     data = {}
     for b in BROKERS:
         d = load(f"{b}_scaling.json")
@@ -1189,12 +1189,16 @@ def chart_resource_scaling():
         fontsize=14,
     )
 
+    # Lighter shades for CLI lines
+    CLI_COLORS = {"kafka": "#F4A89A", "nats": "#7DD4F0"}
+
     for b in BROKERS:
         if b not in data:
             continue
 
         entries = data[b]
         color = COLORS[b]
+        cli_color = CLI_COLORS[b]
         label = b.upper()
 
         # Separate pass and fail entries
@@ -1204,30 +1208,57 @@ def chart_resource_scaling():
         if pass_entries:
             cpus = [e["cpu_limit"] for e in pass_entries]
             throughputs = [e["throughput"] for e in pass_entries]
+            cli_throughputs = [e.get("cli_throughput", 0) for e in pass_entries]
+            has_cli = any(t > 0 for t in cli_throughputs)
             peak_mems = [e["peak_mem_mb"] for e in pass_entries]
 
+            # Python client throughput (solid, filled marker)
             ax1.plot(
                 cpus,
                 throughputs,
                 color=color,
                 marker="o",
                 linewidth=2.5,
-                label=f"{label} throughput (msg/s)",
+                label=f"{label} Python client (msg/s)",
                 markersize=9,
             )
-            # Add data labels on throughput line
             for xi, yi in zip(cpus, throughputs):
                 ax1.annotate(
                     f"{yi:,.0f}",
                     (xi, yi),
                     textcoords="offset points",
-                    xytext=(0, 10),
+                    xytext=(0, 12),
                     ha="center",
-                    fontsize=8,
+                    fontsize=7,
                     color=color,
                     fontweight="bold",
                 )
 
+            # CLI throughput (solid, triangle marker)
+            if has_cli:
+                ax1.plot(
+                    cpus,
+                    cli_throughputs,
+                    color=cli_color,
+                    marker="^",
+                    linewidth=2.5,
+                    label=f"{label} CLI native (msg/s)",
+                    markersize=9,
+                )
+                for xi, yi in zip(cpus, cli_throughputs):
+                    if yi > 0:
+                        ax1.annotate(
+                            f"{yi:,.0f}",
+                            (xi, yi),
+                            textcoords="offset points",
+                            xytext=(0, -16),
+                            ha="center",
+                            fontsize=7,
+                            color=cli_color,
+                            fontweight="bold",
+                        )
+
+            # Peak memory (dashed, right Y-axis)
             ax2.plot(
                 cpus,
                 peak_mems,
@@ -1257,7 +1288,7 @@ def chart_resource_scaling():
     ax1.set_xlabel(
         "CPU Limit (cores) \u2014 higher = more resources available", fontsize=11
     )
-    ax1.set_ylabel("Throughput (msg/s) \u2014 solid lines", fontsize=11)
+    ax1.set_ylabel("Throughput (msg/s) \u2014 solid lines (\u25cf Python, \u25b2 CLI)", fontsize=11)
     ax2.set_ylabel("Peak Memory (MiB) \u2014 dashed lines", fontsize=11)
 
     # Invert x-axis so highest CPU is on the left (degradation slope reads left-to-right)
@@ -1281,6 +1312,7 @@ def chart_resource_scaling():
         0.5,
         -0.03,
         "Shows how throughput degrades as CPU is progressively restricted (left\u2192right = fewer CPUs).\n"
+        "Solid circles = Python client throughput; triangles = CLI-native throughput (raw broker capacity).\n"
         "The 'knee' where throughput drops sharply reveals each broker's minimum viable CPU.\n"
         "Red X = broker failed to start or OOM'd at that CPU level.",
         ha="center",
