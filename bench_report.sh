@@ -727,5 +727,55 @@ for scenario in "${SCENARIOS[@]}"; do
   generate_report "$scenario"
 done
 
+# ─── Consolidated report ─────────────────────────────────────────────────────
+if [[ ${#SCENARIOS[@]} -gt 1 ]]; then
+  COMBINED="$PROJECT_ROOT/results/benchmark_report.md"
+  echo "  Generating consolidated $COMBINED ..."
+
+  # Sort scenarios for deterministic order: small, medium, large, then anything else alpha
+  IFS=$'\n' SORTED=($(for s in "${SCENARIOS[@]}"; do
+    case "$s" in
+      small)  echo "1 $s" ;;
+      medium) echo "2 $s" ;;
+      large)  echo "3 $s" ;;
+      *)      echo "4 $s" ;;
+    esac
+  done | sort | sed 's/^[0-9] //'))
+  unset IFS
+
+  cat > "$COMBINED" <<'HEADER'
+# Kafka vs NATS — Consolidated Benchmark Report
+
+This report combines results from all scenario sizes into a single document.
+
+## Table of Contents
+
+HEADER
+
+  # Build TOC
+  for scenario in "${SORTED[@]}"; do
+    anchor=$(echo "$scenario" | tr '[:upper:]' '[:lower:]' | tr ' ' '-')
+    echo "- [Scenario: ${scenario^^}](#scenario-${anchor})" >> "$COMBINED"
+  done
+  echo "" >> "$COMBINED"
+  echo "---" >> "$COMBINED"
+  echo "" >> "$COMBINED"
+
+  # Append each per-scenario report
+  for scenario in "${SORTED[@]}"; do
+    local_report="$PROJECT_ROOT/results/$scenario/benchmark_report.md"
+    if [[ -f "$local_report" ]]; then
+      # Rewrite relative chart paths to point to the scenario subdirectory
+      sed "s|(charts/|(${scenario}/charts/|g" "$local_report" >> "$COMBINED"
+      echo "" >> "$COMBINED"
+      echo "---" >> "$COMBINED"
+      echo "" >> "$COMBINED"
+    fi
+  done
+
+  echo "*Consolidated report generated: $(date -Iseconds)*" >> "$COMBINED"
+  echo "  Done: $COMBINED"
+fi
+
 echo ""
 echo "Complete."

@@ -5,9 +5,16 @@
 #   ./bench_status.sh                        # auto-detect latest scenario log
 #   ./bench_status.sh results/scenarios_*.log # specific log file
 #   ./bench_status.sh --all                  # show all scenario logs
+#   ./bench_status.sh --watch                # watch mode (refresh every 5s, auto-exit)
+#   ./bench_status.sh -w 10                  # watch mode with 10s interval
 #
 set -uo pipefail
 PROJECT_ROOT="$(cd "$(dirname "$0")" && pwd)"
+
+# ─── Watch mode globals ──────────────────────────────────────────────────────
+WATCH_MODE=0
+WATCH_INTERVAL=5
+_ALL_DONE=1  # assume done; parse functions set to 0 if anything is still running
 
 # ─── Colors ──────────────────────────────────────────────────────────────────
 _RST='\033[0m'
@@ -268,6 +275,11 @@ parse_benchmark_log() {
   fi
 
   printf "${_CYAN}└────────────────────────────────────────────${_RST}\n"
+
+  # Track whether this run is still in progress for watch mode
+  if [[ "$final_status" != "COMPLETED" && "$final_status" != "FAILED" ]]; then
+    _ALL_DONE=0
+  fi
 }
 
 # ─── Parse a scenario runner log (run_scenarios.sh) ──────────────────────────
@@ -424,6 +436,332 @@ parse_scenario_log() {
   fi
 
   echo ""
+
+  # Track whether this run is still in progress for watch mode
+  if [[ "$overall_status" != "ALL_COMPLETE" ]]; then
+    _ALL_DONE=0
+  fi
+  # Also mark not done if any individual scenario failed (but still running others)
+  for s in "${scenario_statuses[@]}"; do
+    if [[ "$s" == "IN_PROGRESS" ]]; then
+      _ALL_DONE=0
+      break
+    fi
+  done
+}
+
+# ─── Watch-mode animation engine ────────────────────────────────────────────
+_R=0 _G=0 _B=0
+
+_hue_to_rgb() {
+  local hue=$(( $1 % 360 ))
+  local sector=$(( hue / 60 ))
+  local f=$(( hue % 60 ))
+  local rise=$(( 255 * f / 60 ))
+  local fall=$(( 255 * (60 - f) / 60 ))
+  case $sector in
+    0) _R=255; _G=$rise; _B=0    ;;
+    1) _R=$fall; _G=255;  _B=0    ;;
+    2) _R=0;    _G=255;  _B=$rise ;;
+    3) _R=0;    _G=$fall; _B=255  ;;
+    4) _R=$rise; _G=0;    _B=255  ;;
+    *) _R=255;  _G=0;    _B=$fall ;;
+  esac
+}
+
+# Render one animated frame of the live spinner line (in-place via \r)
+# Uses segment-based gradient (no inner loops) for ~30fps in bash.
+_render_watch_line() {
+  local frame=$1 label="$2" done=$3 total=$4 start_epoch=${5:-0}
+  local cols
+  cols=$(tput cols 2>/dev/null || echo 80)
+
+  local -a spin=( '⣾' '⣽' '⣻' '⢿' '⡿' '⣟' '⣯' '⣷' )
+
+  # Truncate label to fit
+  local max_label=$(( cols / 2 ))
+  local dlabel="$label"
+  (( ${#dlabel} > max_label )) && dlabel="${dlabel:0:$((max_label-2))}…"
+
+  # Live elapsed timer (updates every frame, no subshell)
+  local elapsed_str=""
+  if (( start_epoch > 0 )); then
+    local now_e
+    printf -v now_e '%(%s)T' -1
+    local el=$(( now_e - start_epoch ))
+    elapsed_str=" $(human_duration "$el")"
+  fi
+
+  # Progress bar sizing
+  local counter="[${done}/${total}]"
+  local prefix_len=$(( 4 + ${#dlabel} + 1 + ${#counter} + ${#elapsed_str} + 1 ))
+  local bar_w=$(( cols - prefix_len - 2 ))
+  (( bar_w < 8 )) && bar_w=8
+  (( bar_w > 50 )) && bar_w=50
+
+  local fill=$(( total > 0 ? done * bar_w / total : 0 ))
+  (( fill > bar_w )) && fill=$bar_w
+
+  # Scrolling rainbow phase
+  local phase=$(( frame * 4 ))
+  # Shimmer: one segment gets a brightness boost, cycling across
+  local n_seg=8
+  local shimmer_seg=$(( (frame / 3) % n_seg ))
+  local bar="" _tmp
+
+  for (( s = 0; s < n_seg; s++ )); do
+    local seg_start=$(( s * bar_w / n_seg ))
+    local seg_end=$(( (s + 1) * bar_w / n_seg ))
+    local seg_len=$(( seg_end - seg_start ))
+    (( seg_len <= 0 )) && continue
+
+    local hue=$(( (s * 360 / n_seg + phase) % 360 ))
+    _hue_to_rgb "$hue"
+
+    # Shimmer boost on the traveling highlight segment
+    if (( s == shimmer_seg )); then
+      (( _R = _R + 60 > 255 ? 255 : _R + 60 ))
+      (( _G = _G + 60 > 255 ? 255 : _G + 60 ))
+      (( _B = _B + 60 > 255 ? 255 : _B + 60 ))
+    fi
+
+    if (( fill >= seg_end )); then
+      # Entire segment is filled
+      bar+="\e[38;2;${_R};${_G};${_B}m"
+      printf -v _tmp '%*s' "$seg_len" ''; bar+="${_tmp// /█}"
+    elif (( fill <= seg_start )); then
+      # Entire segment is empty — subtle pulsing dim
+      local dim=$(( 30 + (frame + s) % 3 * 10 ))
+      bar+="\e[38;2;${dim};${dim};${dim}m"
+      printf -v _tmp '%*s' "$seg_len" ''; bar+="${_tmp// /░}"
+    else
+      # Edge falls within this segment: filled ▓ empty
+      local n_fill=$(( fill - seg_start ))
+      local n_empty=$(( seg_end - fill - 1 ))
+      if (( n_fill > 0 )); then
+        bar+="\e[38;2;${_R};${_G};${_B}m"
+        printf -v _tmp '%*s' "$n_fill" ''; bar+="${_tmp// /█}"
+      fi
+      bar+="\e[38;2;${_R};${_G};${_B}m▓"
+      if (( n_empty > 0 )); then
+        local dim=$(( 30 + (frame + s) % 3 * 10 ))
+        bar+="\e[38;2;${dim};${dim};${dim}m"
+        printf -v _tmp '%*s' "$n_empty" ''; bar+="${_tmp// /░}"
+      fi
+    fi
+  done
+
+  # Spinner with rainbow color cycling
+  local sh=$(( frame * 25 % 360 ))
+  _hue_to_rgb "$sh"
+  local si=$(( frame % ${#spin[@]} ))
+
+  # Breathing color for label text
+  local breath=$(( frame % 40 ))
+  local bright
+  if (( breath < 20 )); then
+    bright=$(( 130 + breath * 125 / 20 ))
+  else
+    bright=$(( 130 + (40 - breath) * 125 / 20 ))
+  fi
+
+  printf '\r\e[K \e[38;2;%d;%d;%dm%s\e[0m \e[38;2;%d;%d;%dm%s\e[0m \e[2m%s\e[0m\e[38;2;255;180;60m%s\e[0m %b\e[0m' \
+    "$_R" "$_G" "$_B" "${spin[$si]}" \
+    "$bright" "$bright" "$bright" "$dlabel" \
+    "$counter" \
+    "$elapsed_str" \
+    "$bar"
+}
+
+# Celebration animation on completion
+_celebrate() {
+  local cols
+  cols=$(tput cols 2>/dev/null || echo 80)
+  local msg="✨ All benchmarks complete! ✨"
+  local msg_len=${#msg}
+  local pad=$(( (cols - msg_len) / 2 ))
+  (( pad < 0 )) && pad=0
+
+  printf '\e[?25l'
+  # Rainbow flash across the text
+  for (( f = 0; f < 24; f++ )); do
+    local hue=$(( f * 15 % 360 ))
+    _hue_to_rgb "$hue"
+    printf '\r\e[K%*s\e[1;38;2;%d;%d;%dm%s\e[0m' "$pad" "" "$_R" "$_G" "$_B" "$msg"
+    sleep 0.04
+  done
+  # Settle on green
+  printf '\r\e[K%*s\e[1;38;2;80;255;120m%s\e[0m\n' "$pad" "" "$msg"
+  printf '\e[?25h'
+}
+
+# ─── Smart watch mode ───────────────────────────────────────────────────────
+# Prints full status once, then only shows new step completions + animated
+# spinner line in-place. Exits automatically when everything finishes.
+_watch_mode() {
+  local -a log_files=("$@")
+
+  # 1) Full static display (stays on screen forever)
+  _display_status
+  if (( _ALL_DONE )); then
+    _celebrate
+    return 0
+  fi
+
+  printf "\n${_DIM}──── Live watch (every %ds) · Ctrl-C to stop ─────────────────${_RST}\n\n" "$WATCH_INTERVAL"
+
+  # 2) State tracking — associative arrays survive across iterations
+  declare -A _wprev           # "label:step_idx" -> 1 if already seen completed
+  declare -A _wprev_scenario  # "scenario_name" -> 1 if PASSED/FAILED already printed
+
+  # Current running info (displayed on the spinner line)
+  local _wlabel="…" _wdone=0 _wtotal=11 _wstart_epoch=0
+
+  # ── Check one benchmark log for new step completions ──
+  # Prints timestamped lines for any newly completed steps.
+  # Sets _wlabel/_wdone/_wtotal if there's still work to do.
+  # Returns 0 if this benchmark is fully done, 1 if still running.
+  _wcheck_bench() {
+    local bench_log="$1" label="$2"
+    local bench_dir
+    bench_dir=$(dirname "$bench_log")
+    local bp
+    bp=$(strip_ansi < "$bench_log")
+    _count_completed_steps "$bp" "$bench_dir/checkpoint.log"
+    local done_count=${#COMPLETED_STEPS[@]}
+
+    # Detect new completions
+    for idx in "${COMPLETED_STEPS[@]}"; do
+      local key="${label}:${idx}"
+      if [[ -z "${_wprev[$key]+x}" ]]; then
+        _wprev["$key"]=1
+        local step_name="${STEP_NAMES[$idx]}"
+        local ts
+        ts=$(date +%H:%M:%S)
+        # Clear spinner line, emit completion, spinner will redraw next frame
+        printf '\r\e[K'
+        printf " ${_DIM}[%s]${_RST} ${_GREEN}✔${_RST} %s" "$ts" "$step_name"
+        [[ -n "$label" ]] && printf " ${_DIM}(%s)${_RST}" "$label"
+        printf "\n"
+      fi
+    done
+
+    # Find current (first non-completed) step
+    local current_idx=-1
+    for i in "${!STEP_NAMES[@]}"; do
+      local key2="${label}:${i}"
+      if [[ -z "${_wprev[$key2]+x}" ]]; then
+        current_idx=$i
+        break
+      fi
+    done
+
+    if (( current_idx >= 0 )); then
+      _wlabel="${STEP_NAMES[$current_idx]}"
+      [[ -n "$label" ]] && _wlabel="$label ▸ $_wlabel"
+      _wdone=$done_count
+      _wtotal=11
+      # Extract start timestamp for live elapsed display
+      local start_ts
+      start_ts=$(grep -oP 'Started: \K[0-9T:.+\-]+' <<< "$bp" | head -1)
+      if [[ -n "$start_ts" ]]; then
+        _wstart_epoch=$(date -d "$start_ts" +%s 2>/dev/null || echo 0)
+      fi
+      return 1 # still running
+    fi
+
+    # All steps done
+    _wdone=$done_count
+    if grep -q "Benchmark complete" <<< "$bp" || grep -q "FAILED" <<< "$bp"; then
+      return 0
+    fi
+    return 1
+  }
+
+  # ── Scan all watched logs, detect changes, return 0 if everything done ──
+  _wscan_all() {
+    local all_done=1
+
+    for lf in "${log_files[@]}"; do
+      local plain
+      plain=$(strip_ansi < "$lf")
+
+      if grep -q "Multi-Scenario Benchmark Runner" <<< "$plain"; then
+        # Scenario log — iterate each scenario's benchmark log
+        while IFS= read -r _wline; do
+          local sname
+          sname=$(echo "$_wline" | grep -oP 'SCENARIO: \K\w+')
+          local lname="${sname,,}"
+
+          # Scenario-level PASSED/FAILED announcements
+          if grep -q "Scenario '${lname}' PASSED" <<< "$plain"; then
+            if [[ -z "${_wprev_scenario[$lname]+x}" ]]; then
+              _wprev_scenario["$lname"]=1
+              printf '\r\e[K'
+              printf " ${_DIM}[%s]${_RST} ${_GREEN}✔ Scenario %s PASSED${_RST}\n" "$(date +%H:%M:%S)" "${lname^^}"
+            fi
+          elif grep -q "Scenario '${lname}' FAILED" <<< "$plain"; then
+            if [[ -z "${_wprev_scenario[$lname]+x}" ]]; then
+              _wprev_scenario["$lname"]=1
+              printf '\r\e[K'
+              printf " ${_DIM}[%s]${_RST} ${_RED}✘ Scenario %s FAILED${_RST}\n" "$(date +%H:%M:%S)" "${lname^^}"
+            fi
+          fi
+
+          # Per-step progress
+          local bench_log
+          bench_log=$(ls -t "$PROJECT_ROOT/results/${lname}"/benchmark_*.log 2>/dev/null | head -1)
+          if [[ -n "$bench_log" && -f "$bench_log" ]]; then
+            _wcheck_bench "$bench_log" "$lname" || all_done=0
+          else
+            all_done=0
+          fi
+        done < <(grep 'SCENARIO:' <<< "$plain")
+
+        if ! grep -q "All scenarios complete" <<< "$plain"; then
+          all_done=0
+        fi
+      else
+        # Single benchmark log
+        _wcheck_bench "$lf" "" || all_done=0
+      fi
+    done
+
+    return $(( !all_done ))  # 0 = all done
+  }
+
+  # 3) Seed initial state (mark everything already completed, suppress output)
+  {
+    _wscan_all
+  } > /dev/null 2>&1
+
+  # 4) Enter animated watch loop
+  printf '\e[?25l' # hide cursor
+  trap 'printf "\e[?25h\r\e[K\n${_DIM}Watch stopped.${_RST}\n"; exit 0' INT
+
+  local frame=0 last_check
+  printf -v last_check '%(%s)T' -1
+
+  while true; do
+    local now_s
+    printf -v now_s '%(%s)T' -1
+
+    # Periodic log re-check
+    if (( now_s - last_check >= WATCH_INTERVAL )); then
+      last_check=$now_s
+      if _wscan_all; then
+        printf '\r\e[K'
+        printf '\e[?25h'
+        _celebrate
+        return 0
+      fi
+    fi
+
+    # Render animated spinner line in-place
+    _render_watch_line "$frame" "$_wlabel" "$_wdone" "$_wtotal" "$_wstart_epoch"
+    (( frame++ ))
+    sleep 0.06
+  done
 }
 
 # ─── Main ────────────────────────────────────────────────────────────────────
@@ -433,46 +771,74 @@ if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
   echo "Parse benchmark logs and show progress, errors, and timing."
   echo ""
   echo "Options:"
-  echo "  (no args)    Auto-detect latest scenario log in results/"
-  echo "  --all        Show all scenario logs"
-  echo "  --latest N   Show latest N logs (default: 1)"
-  echo "  FILE         Parse a specific log file"
-  echo "  -h, --help   Show this help"
+  echo "  (no args)        Auto-detect latest scenario log in results/"
+  echo "  --all            Show all scenario logs"
+  echo "  --latest N       Show latest N logs (default: 1)"
+  echo "  -w, --watch [N]  Watch mode: refresh every N seconds (default: 5),"
+  echo "                   auto-exit when all benchmarks complete"
+  echo "  FILE             Parse a specific log file"
+  echo "  -h, --help       Show this help"
   exit 0
 fi
 
 SHOW_COUNT=1
 
-if [[ "${1:-}" == "--all" ]]; then
-  SHOW_COUNT=999
-  shift
-elif [[ "${1:-}" == "--latest" ]]; then
-  SHOW_COUNT="${2:-1}"
-  shift 2
-fi
+# Parse flags (order-independent)
+while [[ $# -gt 0 ]]; do
+  case "${1:-}" in
+    -w|--watch)
+      WATCH_MODE=1
+      # Optional interval argument (next arg if it's a number)
+      if [[ "${2:-}" =~ ^[0-9]+$ ]]; then
+        WATCH_INTERVAL="$2"
+        shift
+      fi
+      shift
+      ;;
+    --all)
+      SHOW_COUNT=999
+      shift
+      ;;
+    --latest)
+      SHOW_COUNT="${2:-1}"
+      shift 2
+      ;;
+    *)
+      break
+      ;;
+  esac
+done
+
+WATCH_LOGS=()
 
 if [[ $# -gt 0 && -f "$1" ]]; then
   # Specific file given
   log_file="$1"
-  if grep -q "Multi-Scenario Benchmark Runner" <(strip_ansi < "$log_file"); then
-    parse_scenario_log "$log_file"
-  else
-    parse_benchmark_log "$log_file"
-  fi
+  WATCH_LOGS=("$log_file")
+  _display_status() {
+    _ALL_DONE=1
+    if grep -q "Multi-Scenario Benchmark Runner" <(strip_ansi < "$log_file"); then
+      parse_scenario_log "$log_file"
+    else
+      parse_benchmark_log "$log_file"
+    fi
+  }
 else
   # Auto-detect from results/
   RESULTS_DIR="${RESULTS_DIR:-$PROJECT_ROOT/results}"
-  logs=()
-  while IFS= read -r f; do
-    logs+=("$f")
-  done < <(ls -t "${RESULTS_DIR}"/scenarios_*.log 2>/dev/null | head -"$SHOW_COUNT")
-
-  if [[ ${#logs[@]} -eq 0 ]]; then
-    # Fall back to benchmark_*.log in results/
+  _find_logs() {
+    logs=()
     while IFS= read -r f; do
       logs+=("$f")
-    done < <(ls -t "${RESULTS_DIR}"/benchmark_*.log 2>/dev/null | head -"$SHOW_COUNT")
-  fi
+    done < <(ls -t "${RESULTS_DIR}"/scenarios_*.log 2>/dev/null | head -"$SHOW_COUNT")
+
+    if [[ ${#logs[@]} -eq 0 ]]; then
+      while IFS= read -r f; do
+        logs+=("$f")
+      done < <(ls -t "${RESULTS_DIR}"/benchmark_*.log 2>/dev/null | head -"$SHOW_COUNT")
+    fi
+  }
+  _find_logs
 
   if [[ ${#logs[@]} -eq 0 ]]; then
     echo "No benchmark logs found in $RESULTS_DIR/"
@@ -480,11 +846,24 @@ else
     exit 1
   fi
 
-  for log_file in "${logs[@]}"; do
-    if grep -q "Multi-Scenario Benchmark Runner" <(strip_ansi < "$log_file"); then
-      parse_scenario_log "$log_file"
-    else
-      parse_benchmark_log "$log_file"
-    fi
-  done
+  WATCH_LOGS=("${logs[@]}")
+
+  _display_status() {
+    _ALL_DONE=1
+    _find_logs
+    for log_file in "${logs[@]}"; do
+      if grep -q "Multi-Scenario Benchmark Runner" <(strip_ansi < "$log_file"); then
+        parse_scenario_log "$log_file"
+      else
+        parse_benchmark_log "$log_file"
+      fi
+    done
+  }
+fi
+
+# ─── Execute (single-shot or watch mode) ─────────────────────────────────────
+if (( WATCH_MODE )); then
+  _watch_mode "${WATCH_LOGS[@]}"
+else
+  _display_status
 fi

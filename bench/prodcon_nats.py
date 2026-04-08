@@ -39,9 +39,14 @@ BATCH_SIZE = 500
 
 
 async def ensure_stream():
-    """Create the JetStream stream if it doesn't exist."""
+    """Create (or purge) the JetStream stream so we start from zero."""
     nc = await nats.connect(NATS_URL)
     js = nc.jetstream()
+    try:
+        await js.delete_stream(STREAM)
+        print(f"Deleted old stream {STREAM}", file=sys.stderr)
+    except Exception:
+        pass  # stream didn't exist
     try:
         await js.add_stream(
             name=STREAM,
@@ -51,8 +56,6 @@ async def ensure_stream():
             storage="file",
         )
         print(f"Created stream {STREAM}", file=sys.stderr)
-    except nats.js.errors.BadRequestError:
-        print(f"Stream {STREAM} already exists", file=sys.stderr)
     except Exception as e:
         print(f"Warning creating stream: {e}", file=sys.stderr)
     await nc.close()
@@ -169,13 +172,20 @@ async def _producer_worker_counted(worker_id, stop_time, count_dict):
 
 
 async def _consumer_worker_counted(worker_id, stop_time, count_dict):
-    """Single consumer coroutine inside the consumer process."""
+    """Single consumer coroutine using push-based subscribe with a queue group.
+
+    This is the NATS equivalent of Kafka's consumer-group pattern:
+    multiple subscribers in the same queue group → server distributes
+    messages round-robin across members, just like Kafka partitions
+    are assigned to consumers in the same group.id.
+    """
     nc = await nats.connect(NATS_URL)
     js = nc.jetstream()
 
-    sub = await js.pull_subscribe(
+    sub = await js.subscribe(
         SUBJECT,
-        durable=f"bench-prodcon-consumer-{worker_id}",
+        queue="bench-prodcon-group",
+        durable="bench-prodcon-group",
         stream=STREAM,
     )
 
@@ -184,31 +194,32 @@ async def _consumer_worker_counted(worker_id, stop_time, count_dict):
 
     while time.monotonic() < stop_time:
         try:
-            msgs = await asyncio.wait_for(sub.fetch(batch=500), timeout=0.5)
+            msg = await asyncio.wait_for(sub.next_msg(timeout=1.0), timeout=1.0)
+            await msg.ack()
+            consumed += 1
+            if consumed % 500 == 0:
+                count_dict[worker_id] = consumed
         except asyncio.TimeoutError:
             continue
         except Exception:
             break
 
-        for msg in msgs:
-            await msg.ack()
-            consumed += 1
-        count_dict[worker_id] = consumed
+    count_dict[worker_id] = consumed
 
     # Drain remaining messages
     drain_deadline = time.monotonic() + 3
     while time.monotonic() < drain_deadline:
         try:
-            msgs = await asyncio.wait_for(sub.fetch(batch=500), timeout=0.5)
-            for msg in msgs:
-                await msg.ack()
-                consumed += 1
-            count_dict[worker_id] = consumed
+            msg = await asyncio.wait_for(sub.next_msg(timeout=0.5), timeout=0.5)
+            await msg.ack()
+            consumed += 1
         except (asyncio.TimeoutError, Exception):
             break
 
+    count_dict[worker_id] = consumed
     await sub.unsubscribe()
     await nc.close()
+
     wall = time.monotonic() - t0
     return {
         "worker": worker_id,
@@ -219,7 +230,12 @@ async def _consumer_worker_counted(worker_id, stop_time, count_dict):
 
 
 def _consumer_process(num, stop_time, result_queue, count_dict):
-    """Entry-point for the consumer OS process."""
+    """Entry-point for the consumer OS process.
+
+    Spawns NUM_CONSUMERS coroutines, each with its own NATS connection
+    and push subscription in the same queue group — matching Kafka's
+    4 consumer threads with a shared group.id.
+    """
 
     async def _main():
         tasks = [
@@ -325,6 +341,7 @@ def main():
             "aggregate_rate": round(cons_total_consumed / cons_total_wall, 1)
             if cons_total_wall > 0
             else 0,
+            "per_worker": consumer_results,
             "per_worker": consumer_results,
         },
     }

@@ -30,7 +30,8 @@ run_prodcon() {
   echo ""
 }
 
-run_prodcon "kafka" "$PROJECT_ROOT/infra/docker-compose.kafka.yml" "$PROJECT_ROOT/bench/prodcon_kafka.py"
+# TEMPORARILY SKIPPED — Kafka prodcon was fine, only NATS needed the multiprocessing fix
+# run_prodcon "kafka" "$PROJECT_ROOT/infra/docker-compose.kafka.yml" "$PROJECT_ROOT/bench/prodcon_kafka.py"
 run_prodcon "nats"  "$PROJECT_ROOT/infra/docker-compose.nats.yml"  "$PROJECT_ROOT/bench/prodcon_nats.py"
 
 log "=== Simultaneous producer+consumer benchmark complete. Results in results/*_prodcon.json ==="
