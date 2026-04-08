@@ -121,6 +121,27 @@ log() {
 log "Master log: $MASTER_LOG"
 # ─────────────────────────────────────────────────────────────────────────────
 
+# ─── Ctrl+C guard ───────────────────────────────────────────────────────────
+_handle_sigint() {
+  echo ""
+  printf "${_YELLOW}Ctrl+C detected. Are you sure you want to cancel? [y/N] ${_RST}"
+  trap - INT  # second Ctrl+C during prompt kills immediately
+  local answer=""
+  read -r -t 15 answer </dev/tty 2>/dev/null || answer="n"
+  case "$answer" in
+    [yY]|[yY][eE][sS])
+      printf "${_RED}Aborting benchmark run...${_RST}\n"
+      exit 130
+      ;;
+    *)
+      printf "${_GREEN}Resuming benchmark.${_RST}\n"
+      trap '_handle_sigint' INT
+      ;;
+  esac
+}
+trap '_handle_sigint' INT
+# ─────────────────────────────────────────────────────────────────────────────
+
 # ─── Run each scenario ───────────────────────────────────────────────────────
 printf "${_MAG}============================================================${_RST}\n"
 printf "${_MAG}  Multi-Scenario Benchmark Runner${_RST}\n"

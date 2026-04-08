@@ -181,10 +181,36 @@ printf "${_BLUE}  Results:  ${RESULTS_DIR}${_RST}\n"
 printf "${_MAG}============================================${_RST}\n"
 echo ""
 
+# ─── Ctrl+C guard ───────────────────────────────────────────────────────────
+_cancel_confirmed=0
+_handle_sigint() {
+  echo ""
+  printf "${_YELLOW}Ctrl+C detected. Are you sure you want to cancel? [y/N] ${_RST}"
+  # Temporarily restore default SIGINT so a second Ctrl+C during the prompt kills immediately
+  trap - INT
+  local answer=""
+  read -r -t 15 answer </dev/tty 2>/dev/null || answer="n"
+  case "$answer" in
+    [yY]|[yY][eE][sS])
+      printf "${_RED}Aborting benchmark...${_RST}\n"
+      _cancel_confirmed=1
+      kill $METRICS_PID 2>/dev/null || true
+      exit 130
+      ;;
+    *)
+      printf "${_GREEN}Resuming benchmark.${_RST}\n"
+      trap '_handle_sigint' INT
+      ;;
+  esac
+}
+trap '_handle_sigint' INT
+# ─────────────────────────────────────────────────────────────────────────────
+
 # Start background metrics collector
 "$PROJECT_ROOT/scripts/metrics_collector.sh" &
 METRICS_PID=$!
 trap "kill $METRICS_PID 2>/dev/null || true; echo 'Metrics collector stopped.'" EXIT
+trap '_handle_sigint' INT  # re-set after EXIT trap overwrites
 log "Metrics collector running (PID $METRICS_PID)"
 echo ""
 

@@ -60,6 +60,22 @@ uv sync
 Per-scenario results go to `results/{large,medium,small}/`. Cross-scenario comparison charts
 and a combined mega-image are generated automatically in `results/comparison/`.
 
+### Monitor a running benchmark
+
+```bash
+./bench_status.sh                        # latest run — auto-detects scenario log
+./bench_status.sh --all                  # all past runs
+./bench_status.sh --latest 3             # last 3 runs
+./bench_status.sh results/large/benchmark_*.log  # specific log file
+```
+
+Shows per-scenario status (RUNNING / COMPLETED / INTERRUPTED / FAILED), a step-by-step
+progress checklist, elapsed time, remaining steps, and any errors extracted from the logs.
+
+> **Ctrl+C guard:** Both `run_all.sh` and `run_scenarios.sh` intercept Ctrl+C and prompt
+> `Are you sure you want to cancel? [y/N]` before aborting. Press N or Enter to resume.
+> A second Ctrl+C during the prompt kills immediately.
+
 ### Re-run missing or failed steps
 
 If a scenario ran partially (e.g. medium/small are missing some benchmarks), re-run only
@@ -225,6 +241,7 @@ results/
 ├── comparison/                           # cross-scenario (auto-generated)
 │   ├── cmp_01_idle.png … cmp_11_throughput_vs_resources.png
 │   └── mega_comparison.png
+├── scenarios_*.log                       # run_scenarios.sh master log
 ├── *.json                                # single-scenario (run_all.sh directly)
 ├── docker_stats.csv
 ├── full_report.json
@@ -283,5 +300,3 @@ Remove all benchmark results:
 ```bash
 rm -rf results/*/charts results/comparison results/charts results/*/*.json results/*/*.csv results/*/*.log
 ```
-
-
