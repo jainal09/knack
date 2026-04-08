@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
 """NATS JetStream simultaneous producer+consumer — sustained load benchmark.
 
-Runs NUM_PRODUCERS producer tasks and NUM_CONSUMERS consumer tasks
-simultaneously via asyncio.gather for TEST_DURATION_SEC seconds.
+Runs NUM_PRODUCERS producer tasks and NUM_CONSUMERS consumer tasks in
+**separate OS processes** (each with its own asyncio event loop) so that
+high-throughput producers cannot starve the consumer coroutines.
 """
 
 import asyncio
 import json
+import multiprocessing
 import os
 import sys
 import time
@@ -35,14 +37,11 @@ NUM_CONS = int(_cfg("NUM_CONSUMERS"))
 MAX_INFLIGHT = 256
 BATCH_SIZE = 500
 
-producer_results = []
-consumer_results = []
-_prod_counts: dict[int, int] = {}
-_cons_counts: dict[int, int] = {}
 
-
-async def ensure_stream(js):
+async def ensure_stream():
     """Create the JetStream stream if it doesn't exist."""
+    nc = await nats.connect(NATS_URL)
+    js = nc.jetstream()
     try:
         await js.add_stream(
             name=STREAM,
@@ -56,10 +55,19 @@ async def ensure_stream(js):
         print(f"Stream {STREAM} already exists", file=sys.stderr)
     except Exception as e:
         print(f"Warning creating stream: {e}", file=sys.stderr)
+    await nc.close()
 
 
-async def producer_worker(worker_id, js, stop_event):
-    """Single producer coroutine: publishes as fast as possible until stop."""
+# ---------------------------------------------------------------------------
+# Producer process
+# ---------------------------------------------------------------------------
+
+
+async def _producer_worker(worker_id, stop_time):
+    """Single producer coroutine inside the producer process."""
+    nc = await nats.connect(NATS_URL)
+    js = nc.jetstream()
+
     sent = 0
     errors = 0
     sem = asyncio.Semaphore(MAX_INFLIGHT)
@@ -76,25 +84,95 @@ async def producer_worker(worker_id, js, stop_event):
                 if errors <= 5:
                     print(f"Producer {worker_id} error: {e}", file=sys.stderr)
 
-    while not stop_event.is_set():
+    while time.monotonic() < stop_time:
         tasks = [asyncio.create_task(_pub()) for _ in range(BATCH_SIZE)]
         await asyncio.gather(*tasks)
-        _prod_counts[worker_id] = sent
 
+    await nc.close()
     wall = time.monotonic() - t0
-    producer_results.append(
-        {
-            "worker": worker_id,
-            "sent": sent,
-            "errors": errors,
-            "wall_sec": round(wall, 2),
-            "avg_rate": round(sent / wall, 1) if wall > 0 else 0,
-        }
-    )
+    return {
+        "worker": worker_id,
+        "sent": sent,
+        "errors": errors,
+        "wall_sec": round(wall, 2),
+        "avg_rate": round(sent / wall, 1) if wall > 0 else 0,
+    }
 
 
-async def consumer_worker(worker_id, js, stop_event):
-    """Single consumer coroutine: pulls as fast as possible until stop."""
+async def _run_producers(num, stop_time):
+    """Run all producer workers in this process's event loop."""
+    tasks = [asyncio.create_task(_producer_worker(i, stop_time)) for i in range(num)]
+    return await asyncio.gather(*tasks)
+
+
+def _producer_process(num, stop_time, result_queue, count_dict):
+    """Entry-point for the producer OS process."""
+
+    async def _main():
+        # Live counter updater
+        async def _counter_loop():
+            while time.monotonic() < stop_time:
+                await asyncio.sleep(0.5)
+
+        tasks = []
+        for i in range(num):
+            tasks.append(
+                asyncio.create_task(_producer_worker_counted(i, stop_time, count_dict))
+            )
+        await asyncio.gather(*tasks)
+        for r in [t.result() if hasattr(t, "result") else t for t in tasks]:
+            result_queue.put(("producer", r))
+
+    asyncio.run(_main())
+
+
+async def _producer_worker_counted(worker_id, stop_time, count_dict):
+    """Producer worker that also updates shared counter dict."""
+    nc = await nats.connect(NATS_URL)
+    js = nc.jetstream()
+
+    sent = 0
+    errors = 0
+    sem = asyncio.Semaphore(MAX_INFLIGHT)
+    t0 = time.monotonic()
+
+    async def _pub():
+        nonlocal sent, errors
+        async with sem:
+            try:
+                await js.publish(SUBJECT, PAYLOAD)
+                sent += 1
+            except Exception as e:
+                errors += 1
+                if errors <= 5:
+                    print(f"Producer {worker_id} error: {e}", file=sys.stderr)
+
+    while time.monotonic() < stop_time:
+        tasks = [asyncio.create_task(_pub()) for _ in range(BATCH_SIZE)]
+        await asyncio.gather(*tasks)
+        count_dict[worker_id] = sent
+
+    await nc.close()
+    wall = time.monotonic() - t0
+    return {
+        "worker": worker_id,
+        "sent": sent,
+        "errors": errors,
+        "wall_sec": round(wall, 2),
+        "avg_rate": round(sent / wall, 1) if wall > 0 else 0,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Consumer process
+# ---------------------------------------------------------------------------
+
+
+async def _consumer_worker_counted(worker_id, stop_time, count_dict):
+    """Single consumer coroutine inside the consumer process."""
+    nc = await nats.connect(NATS_URL)
+    js = nc.jetstream()
+
     sub = await js.pull_subscribe(
         SUBJECT,
         durable=f"bench-prodcon-consumer-{worker_id}",
@@ -104,7 +182,7 @@ async def consumer_worker(worker_id, js, stop_event):
     consumed = 0
     t0 = time.monotonic()
 
-    while not stop_event.is_set():
+    while time.monotonic() < stop_time:
         try:
             msgs = await asyncio.wait_for(sub.fetch(batch=500), timeout=0.5)
         except asyncio.TimeoutError:
@@ -115,7 +193,7 @@ async def consumer_worker(worker_id, js, stop_event):
         for msg in msgs:
             await msg.ack()
             consumed += 1
-        _cons_counts[worker_id] = consumed
+        count_dict[worker_id] = consumed
 
     # Drain remaining messages
     drain_deadline = time.monotonic() + 3
@@ -125,77 +203,105 @@ async def consumer_worker(worker_id, js, stop_event):
             for msg in msgs:
                 await msg.ack()
                 consumed += 1
-            _cons_counts[worker_id] = consumed
+            count_dict[worker_id] = consumed
         except (asyncio.TimeoutError, Exception):
             break
 
-    wall = time.monotonic() - t0
     await sub.unsubscribe()
-
-    consumer_results.append(
-        {
-            "worker": worker_id,
-            "consumed": consumed,
-            "wall_sec": round(wall, 2),
-            "avg_rate": round(consumed / wall, 1) if wall > 0 else 0,
-        }
-    )
-
-
-async def main():
-    nc = await nats.connect(NATS_URL)
-    js = nc.jetstream()
-
-    await ensure_stream(js)
-    await asyncio.sleep(1)
-
-    stop_event = asyncio.Event()
-
-    # Start consumers first
-    cons_tasks = [
-        asyncio.create_task(consumer_worker(i, js, stop_event))
-        for i in range(NUM_CONS)
-    ]
-    await asyncio.sleep(2)  # Let consumers subscribe
-
-    # Start producers
-    prod_tasks = [
-        asyncio.create_task(producer_worker(i, js, stop_event))
-        for i in range(NUM_PROD)
-    ]
-
-    # Progress monitor
-    async def _progress_monitor():
-        with tqdm(
-            total=DURATION, unit="s", desc="NATS prodcon", file=sys.stderr
-        ) as pbar:
-            for _ in range(DURATION):
-                await asyncio.sleep(1)
-                pbar.update(1)
-                prod_total = sum(_prod_counts.values())
-                cons_total = sum(_cons_counts.values())
-                pbar.set_postfix(prod=f"{prod_total:,}", cons=f"{cons_total:,}")
-
-    monitor = asyncio.create_task(_progress_monitor())
-
-    # Wait for duration
-    await asyncio.sleep(DURATION)
-    stop_event.set()
-
-    await asyncio.gather(*prod_tasks)
-    await asyncio.gather(*cons_tasks)
-    monitor.cancel()
-
     await nc.close()
+    wall = time.monotonic() - t0
+    return {
+        "worker": worker_id,
+        "consumed": consumed,
+        "wall_sec": round(wall, 2),
+        "avg_rate": round(consumed / wall, 1) if wall > 0 else 0,
+    }
+
+
+def _consumer_process(num, stop_time, result_queue, count_dict):
+    """Entry-point for the consumer OS process."""
+
+    async def _main():
+        tasks = [
+            asyncio.create_task(_consumer_worker_counted(i, stop_time, count_dict))
+            for i in range(num)
+        ]
+        results = await asyncio.gather(*tasks)
+        for r in results:
+            result_queue.put(("consumer", r))
+
+    asyncio.run(_main())
+
+
+# ---------------------------------------------------------------------------
+# Main orchestrator (runs in the original process)
+# ---------------------------------------------------------------------------
+
+
+def main():
+    # Ensure stream exists before spawning children
+    asyncio.run(ensure_stream())
+    time.sleep(1)
+
+    manager = multiprocessing.Manager()
+    result_queue = manager.Queue()
+    prod_counts = manager.dict()
+    cons_counts = manager.dict()
+
+    stop_time = time.monotonic() + DURATION + 4  # +4 s for startup slack
+
+    # Start consumer process first so subscriptions are ready
+    cp = multiprocessing.Process(
+        target=_consumer_process,
+        args=(NUM_CONS, stop_time, result_queue, cons_counts),
+    )
+    cp.start()
+    time.sleep(2)  # Let consumers subscribe
+
+    # Adjust stop_time for producers (they should stop a bit before consumers
+    # so consumers can drain)
+    prod_stop_time = time.monotonic() + DURATION
+    pp = multiprocessing.Process(
+        target=_producer_process,
+        args=(NUM_PROD, prod_stop_time, result_queue, prod_counts),
+    )
+    pp.start()
+
+    # Progress bar in the main process
+    with tqdm(total=DURATION, unit="s", desc="NATS prodcon", file=sys.stderr) as pbar:
+        for _ in range(DURATION):
+            time.sleep(1)
+            pbar.update(1)
+            prod_total = sum(prod_counts.values()) if prod_counts else 0
+            cons_total = sum(cons_counts.values()) if cons_counts else 0
+            pbar.set_postfix(prod=f"{prod_total:,}", cons=f"{cons_total:,}")
+
+    # Wait for both child processes to finish
+    pp.join(timeout=30)
+    cp.join(timeout=30)
+
+    # Collect results from the queue
+    producer_results = []
+    consumer_results = []
+    while not result_queue.empty():
+        kind, data = result_queue.get_nowait()
+        if kind == "producer":
+            producer_results.append(data)
+        else:
+            consumer_results.append(data)
 
     # Aggregate producer results
     prod_total_sent = sum(r["sent"] for r in producer_results)
-    prod_total_wall = max(r["wall_sec"] for r in producer_results) if producer_results else 0
+    prod_total_wall = (
+        max(r["wall_sec"] for r in producer_results) if producer_results else 0
+    )
     prod_total_errors = sum(r["errors"] for r in producer_results)
 
     # Aggregate consumer results
     cons_total_consumed = sum(r["consumed"] for r in consumer_results)
-    cons_total_wall = max(r["wall_sec"] for r in consumer_results) if consumer_results else 0
+    cons_total_wall = (
+        max(r["wall_sec"] for r in consumer_results) if consumer_results else 0
+    )
 
     output = {
         "broker": "nats",
@@ -208,13 +314,17 @@ async def main():
             "total_sent": prod_total_sent,
             "total_errors": prod_total_errors,
             "wall_sec": prod_total_wall,
-            "aggregate_rate": round(prod_total_sent / prod_total_wall, 1) if prod_total_wall > 0 else 0,
+            "aggregate_rate": round(prod_total_sent / prod_total_wall, 1)
+            if prod_total_wall > 0
+            else 0,
             "per_worker": producer_results,
         },
         "consumer": {
             "total_consumed": cons_total_consumed,
             "wall_sec": cons_total_wall,
-            "aggregate_rate": round(cons_total_consumed / cons_total_wall, 1) if cons_total_wall > 0 else 0,
+            "aggregate_rate": round(cons_total_consumed / cons_total_wall, 1)
+            if cons_total_wall > 0
+            else 0,
             "per_worker": consumer_results,
         },
     }
@@ -222,4 +332,4 @@ async def main():
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()
