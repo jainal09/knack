@@ -132,6 +132,8 @@ HEADER
   cat >> "$out" <<'SECTION'
 ## 1. Idle Footprint
 
+> **What this measures:** CPU and memory consumed by each broker when idle (no producers/consumers active). Lower is better — a lighter idle footprint means less wasted resources when your system is between load spikes.
+
 SECTION
   [[ -f "$charts_dir/01_idle_footprint.png" ]] && echo "![Idle Footprint](charts/01_idle_footprint.png)" >> "$out"
   cat >> "$out" <<TABLE
@@ -155,6 +157,8 @@ TABLE
 ---
 
 ## 2. Startup & Recovery
+
+> **What this measures:** Time for the broker to become ready from a cold start, and time to recover after a SIGKILL (simulating a crash). Lower is better — faster recovery means shorter outage windows.
 
 TABLE
   [[ -f "$charts_dir/02_startup_recovery.png" ]] && echo "![Startup & Recovery](charts/02_startup_recovery.png)" >> "$out"
@@ -188,6 +192,8 @@ print(rates[len(rates)//2])
 
 ## 3. Producer Throughput (Python Client)
 
+> **What this measures:** Maximum producer message rate using the Python client library (confluent-kafka for Kafka, nats-py for NATS). Runs multiple producer threads at full speed for a fixed duration. Higher is better, but note this reflects **client library performance** — Python GIL and async overhead affect results. See §3b for raw broker capacity.
+
 TABLE
   [[ -f "$charts_dir/03_throughput.png" ]] && echo "![Throughput](charts/03_throughput.png)" >> "$out"
 
@@ -216,6 +222,8 @@ print(f'| **Median** | **{km:,.1f}** | **{nm:,.1f}** |')
 ---
 
 ## 3b. CLI-Native Throughput
+
+> **What this measures:** Raw broker throughput using each broker's optimised CLI tools (kcat for Kafka, nats bench for NATS). These run **on the host** without Python overhead, giving the fairest broker-vs-broker comparison. Higher is better. The decision engine uses these numbers (not Python client numbers) for the throughput comparison.
 
 TABLE
   [[ -f "$charts_dir/03b_cli_throughput.png" ]] && echo "![CLI Throughput](charts/03b_cli_throughput.png)" >> "$out"
@@ -249,6 +257,8 @@ print(f'| ProdCon (sub) | {fv(kp, \"consumer_msgs_per_sec\")} | {fv(np_, \"consu
 
 ## 4. Latency Under Load
 
+> **What this measures:** End-to-end publish-to-receive latency at 50% of peak throughput. Percentiles (p50, p95, p99, p99.9) show how latency distributes under realistic load. Lower is better — p99 is critical for SLA compliance.
+
 TABLE
   [[ -f "$charts_dir/04_latency.png" ]] && echo "![Latency](charts/04_latency.png)" >> "$out"
 
@@ -276,6 +286,8 @@ for p in ['p50_us','p95_us','p99_us','p999_us','max_us']:
 ---
 
 ## 5. Memory Stress
+
+> **What this measures:** Broker stability under progressively restricted Docker memory limits (4g → 512m). For each level the producer benchmark runs and records throughput + errors. PASS = broker stays alive and serves traffic. "Errors" are **produce() call failures** — typically BufferError (producer queue overflow) or broker rejections when memory pressure causes slow message acceptance. NATS shows 0 errors because its backpressure design rejects at the protocol level rather than partially accepting.
 
 TABLE
   [[ -f "$charts_dir/05_memory_stress.png" ]] && echo "![Memory Stress](charts/05_memory_stress.png)" >> "$out"
@@ -317,6 +329,8 @@ print(f'| **Min viable** | **{kmin}** | **{nmin}** |')
 
 ## 6. Scorecard
 
+> **What this shows:** A radar/summary chart comparing both brokers across all dimensions (throughput, latency, memory, CPU, errors, stability). Provides an at-a-glance visual comparison.
+
 TABLE
   [[ -f "$charts_dir/06_scorecard.png" ]] && echo "![Scorecard](charts/06_scorecard.png)" >> "$out"
   echo "" >> "$out"
@@ -326,6 +340,8 @@ TABLE
 ---
 
 ## 7. Consumer Throughput
+
+> **What this measures:** Maximum consumer-side message rate using the Python client library. Multiple consumer workers pull messages as fast as possible. Higher is better.
 
 TABLE
   [[ -f "$charts_dir/07_consumer_throughput.png" ]] && echo "![Consumer Throughput](charts/07_consumer_throughput.png)" >> "$out"
@@ -355,6 +371,8 @@ print(f'| **Median** | **{km:,.1f}** | **{nm:,.1f}** |')
 
 ## 8. Simultaneous Producer + Consumer
 
+> **What this measures:** Throughput when producers and consumers run concurrently (the realistic scenario). Shows whether the broker can handle bidirectional traffic without degradation. The P/C ratio reveals backpressure behaviour. "Producer errors" = failed produce() calls (queue buffer overflow or broker rejection under load).
+
 TABLE
   [[ -f "$charts_dir/08_prodcon.png" ]] && echo "![ProdCon](charts/08_prodcon.png)" >> "$out"
 
@@ -379,6 +397,8 @@ print(f'| Duration (s) | {kp[\"producer\"][\"wall_sec\"]:.1f} | {np_[\"producer\
 
 ## 9. Resource Timeline
 
+> **What this shows:** CPU% and memory over time during the full benchmark run, sampled from docker stats. Reveals resource spikes, steady-state usage, and whether the broker releases resources between tests.
+
 TABLE
   [[ -f "$charts_dir/09_resource_timeline.png" ]] && echo "![Resource Timeline](charts/09_resource_timeline.png)" >> "$out"
   echo "" >> "$out"
@@ -390,6 +410,8 @@ TABLE
 ---
 
 ## 10. Resource Scaling
+
+> **What this measures:** How throughput degrades as CPU cores are progressively restricted (4.0 → 0.5 cores). The "knee" where throughput drops sharply reveals each broker's minimum viable CPU. Flat slope = not CPU-bound; steep drop = CPU bottleneck.
 
 TABLE
   [[ -f "$charts_dir/10_resource_scaling.png" ]] && echo "![Resource Scaling](charts/10_resource_scaling.png)" >> "$out"
@@ -425,6 +447,8 @@ for r in d['resource_scaling']['nats']:
 
 ## 11. Disk I/O Timeline
 
+> **What this shows:** Block I/O (reads + writes) over time from docker stats. Kafka relies heavily on disk for its commit log; NATS JetStream also persists to disk. Higher disk I/O can indicate storage bottlenecks.
+
 TABLE
   [[ -f "$charts_dir/11_disk_io_timeline.png" ]] && echo "![Disk I/O Timeline](charts/11_disk_io_timeline.png)" >> "$out"
   echo "" >> "$out"
@@ -437,6 +461,8 @@ TABLE
 
 ## 12. Throughput vs Resources
 
+> **What this shows:** Scatter/correlation plot of throughput against CPU and memory usage. Reveals whether higher resource consumption actually translates to higher throughput (efficiency).
+
 TABLE
   [[ -f "$charts_dir/12_throughput_vs_resources.png" ]] && echo "![Throughput vs Resources](charts/12_throughput_vs_resources.png)" >> "$out"
   echo "" >> "$out"
@@ -446,6 +472,8 @@ TABLE
 ---
 
 ## 13. Worker Load Balance
+
+> **What this measures:** How evenly work is distributed across producer/consumer workers. CV% (coefficient of variation) → lower is better. High CV% means some workers are doing much more work than others, indicating partition imbalance or contention.
 
 TABLE
   [[ -f "$charts_dir/13_worker_balance.png" ]] && echo "![Worker Balance](charts/13_worker_balance.png)" >> "$out"
@@ -494,6 +522,8 @@ for b in ['kafka', 'nats']:
 
 ## 14. Error Rate Breakdown
 
+> **What this shows:** Total produce() failures across all tests. Kafka errors are typically BufferError (producer queue full) or broker delivery failures under load/memory pressure. NATS uses protocol-level backpressure, so the Python client sees 0 exceptions. Lower is better.
+
 TABLE
   [[ -f "$charts_dir/14_error_breakdown.png" ]] && echo "![Error Breakdown](charts/14_error_breakdown.png)" >> "$out"
 
@@ -536,6 +566,8 @@ for lvl in ['4g', '2g', '1g', '512m']:
 
 ## 15. Throughput Stability Across Repetitions
 
+> **What this measures:** Consistency of throughput across 3 repeated runs. CV% (coefficient of variation) → lower is better. High CV% means results vary significantly between runs, suggesting the broker's performance is sensitive to transient conditions.
+
 TABLE
   [[ -f "$charts_dir/15_throughput_stability.png" ]] && echo "![Throughput Stability](charts/15_throughput_stability.png)" >> "$out"
 
@@ -568,6 +600,8 @@ for test, key in [('Producer', 'throughput'), ('Consumer', 'consumer_throughput'
 
 ## 16. Producer / Consumer Balance Ratio
 
+> **What this measures:** The ratio of producer-to-consumer throughput during simultaneous operation. A ratio near 1.0x means balanced; >1.0x means the producer outpaces the consumer (messages queue up = backpressure risk).
+
 TABLE
   [[ -f "$charts_dir/16_prodcon_balance.png" ]] && echo "![ProdCon Balance](charts/16_prodcon_balance.png)" >> "$out"
 
@@ -595,6 +629,8 @@ for b in ['kafka', 'nats']:
 
 ## 17. Network I/O Timeline
 
+> **What this shows:** Network bytes in/out over time from docker stats. Reveals network bandwidth consumption and whether either broker saturates the network interface.
+
 TABLE
   [[ -f "$charts_dir/17_network_io_timeline.png" ]] && echo "![Network I/O](charts/17_network_io_timeline.png)" >> "$out"
   echo "" >> "$out"
@@ -607,6 +643,8 @@ TABLE
 
 ## 18. Memory Headroom
 
+> **What this shows:** Peak memory usage as a percentage of the container's memory limit over time. Warning at 80%, critical at 95%. Low headroom means the broker is at risk of OOM-kill under load spikes.
+
 TABLE
   [[ -f "$charts_dir/18_memory_headroom.png" ]] && echo "![Memory Headroom](charts/18_memory_headroom.png)" >> "$out"
   echo "" >> "$out"
@@ -618,6 +656,8 @@ TABLE
 ---
 
 ## 19. Scaling Efficiency — Throughput per CPU Core
+
+> **What this measures:** Throughput normalized per CPU core at each CPU limit. Efficiency >100% means the broker gets more throughput per core when constrained (better utilization). Shows how efficiently each broker uses additional CPU resources.
 
 TABLE
   [[ -f "$charts_dir/19_scaling_efficiency.png" ]] && echo "![Scaling Efficiency](charts/19_scaling_efficiency.png)" >> "$out"
@@ -660,6 +700,8 @@ for cpu in all_cpus:
 ---
 
 ## 20. Latency Measurement Context
+
+> **What this shows:** The conditions under which latency was measured — load percentage, target rate, number of samples, and the full percentile breakdown in microseconds. This context is critical for interpreting the latency numbers in §4.
 
 TABLE
   [[ -f "$charts_dir/20_latency_context.png" ]] && echo "![Latency Context](charts/20_latency_context.png)" >> "$out"
