@@ -155,6 +155,18 @@ bash scripts/bench_prodcon.sh           # Simultaneous producer + consumer
 bash scripts/bench_resource_scaling.sh  # Throughput vs CPU limit
 ```
 
+## Generate Markdown report
+
+```bash
+./bench_report.sh                          # all completed scenarios
+./bench_report.sh --scenario large         # specific scenario
+./bench_report.sh --scenario large medium  # multiple scenarios
+```
+
+Generates `results/{scenario}/benchmark_report.md` — a self-contained Markdown document with
+every chart image embedded and the underlying data in tables beneath. Timestamped to the run
+so you know exactly which benchmark produced the data.
+
 ## Generate charts
 
 ```bash
@@ -179,6 +191,14 @@ uv run python3 bench/visualize.py --compare    # cross-scenario comparison chart
 | 10 | `10_resource_scaling.png` | Throughput + peak memory vs CPU limit (dual Y-axis) |
 | 11 | `11_disk_io_timeline.png` | Disk read/write (block I/O) over time |
 | 12 | `12_throughput_vs_resources.png` | Resource efficiency: throughput per CPU core and per GB RAM |
+| 13 | `13_worker_balance.png` | Per-worker throughput distribution (load imbalance detection) |
+| 14 | `14_error_breakdown.png` | Error counts across all test types and memory levels |
+| 15 | `15_throughput_stability.png` | Mean ± stddev across repetitions with CV% |
+| 16 | `16_prodcon_balance.png` | Producer / consumer rate ratio (backpressure indicator) |
+| 17 | `17_network_io_timeline.png` | Network receive/transmit over time from `docker_stats.csv` |
+| 18 | `18_memory_headroom.png` | Memory usage % over time with 80%/95% danger thresholds |
+| 19 | `19_scaling_efficiency.png` | Throughput-per-CPU-core at each limit (diminishing returns) |
+| 20 | `20_latency_context.png` | Latency test context: load%, target rate, samples |
 
 ### Cross-scenario comparison charts (→ `results/comparison/`)
 
@@ -237,7 +257,7 @@ results/
 │   ├── checkpoint.log
 │   ├── benchmark_*.log
 │   └── charts/
-│       ├── 01_idle_footprint.png … 12_throughput_vs_resources.png
+│       ├── 01_idle_footprint.png … 20_latency_context.png
 ├── comparison/                           # cross-scenario (auto-generated)
 │   ├── cmp_01_idle.png … cmp_11_throughput_vs_resources.png
 │   └── mega_comparison.png
@@ -246,7 +266,7 @@ results/
 ├── docker_stats.csv
 ├── full_report.json
 └── charts/
-    ├── 01_idle_footprint.png … 12_throughput_vs_resources.png
+    ├── 01_idle_footprint.png … 20_latency_context.png
 ```
 
 ## Tweak parameters

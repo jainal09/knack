@@ -1024,7 +1024,23 @@ def chart_prodcon():
     print("  -> 08_prodcon.png")
 
 
-# ── Chart 9: Resource Timeline ───────────────────────────────────────
+# ── Docker stats CSV helpers ─────────────────────────────────────────
+
+# The CSV header declares 9 columns (timestamp, container, cpu_pct,
+# mem_usage, mem_limit, mem_pct, net_io, block_io, pids) but data rows
+# have only 8 because docker merges mem_usage and mem_limit into one
+# field like "171.1MiB / 7.761GiB".  _DOCKER_COLS maps logical column
+# names to correct 0-based indices for 8-field data rows.
+_DOCKER_COLS = {
+    "timestamp": 0,
+    "container": 1,
+    "cpu_pct": 2,
+    "mem_usage": 3,
+    "mem_pct": 4,
+    "net_io": 5,
+    "block_io": 6,
+    "pids": 7,
+}
 
 
 def _parse_mem_usage(mem_str):
@@ -1053,19 +1069,17 @@ def chart_resource_timeline():
 
     with open(csv_path) as f:
         reader = csv.reader(f)
-        header = next(reader, None)
-        if not header:
-            return
+        next(reader, None)  # skip header
         for row in reader:
             if len(row) < 5:
                 continue
             try:
-                ts = int(row[0])
-                container = row[1]
+                ts = int(row[_DOCKER_COLS["timestamp"]])
+                container = row[_DOCKER_COLS["container"]]
                 if container not in target_containers:
                     continue
-                cpu = float(row[2].replace("%", ""))
-                mem_mb = _parse_mem_usage(row[3])
+                cpu = float(row[_DOCKER_COLS["cpu_pct"]].replace("%", ""))
+                mem_mb = _parse_mem_usage(row[_DOCKER_COLS["mem_usage"]])
 
                 if container not in container_data:
                     container_data[container] = []
@@ -1318,18 +1332,16 @@ def chart_disk_io_timeline():
 
     with open(csv_path) as f:
         reader = csv.reader(f)
-        header = next(reader, None)
-        if not header:
-            return
+        next(reader, None)  # skip header
         for row in reader:
-            if len(row) < 8:
+            if len(row) < 7:
                 continue
             try:
-                ts = int(row[0])
-                container = row[1]
+                ts = int(row[_DOCKER_COLS["timestamp"]])
+                container = row[_DOCKER_COLS["container"]]
                 if container not in target_containers:
                     continue
-                read_mb, write_mb = _parse_block_io(row[7])
+                read_mb, write_mb = _parse_block_io(row[_DOCKER_COLS["block_io"]])
 
                 if container not in container_data:
                     container_data[container] = []
@@ -1452,11 +1464,11 @@ def chart_throughput_vs_resources():
                     reader = csv.reader(f)
                     next(reader, None)
                     for row in reader:
-                        if len(row) < 5 or row[1] != container_name:
+                        if len(row) < 5 or row[_DOCKER_COLS["container"]] != container_name:
                             continue
                         try:
-                            cpu = float(row[2].replace("%", ""))
-                            mem = _parse_mem_usage(row[3])
+                            cpu = float(row[_DOCKER_COLS["cpu_pct"]].replace("%", ""))
+                            mem = _parse_mem_usage(row[_DOCKER_COLS["mem_usage"]])
                             max_cpu = max(max_cpu, cpu)
                             max_mem = max(max_mem, mem)
                         except (ValueError, IndexError):
@@ -1551,6 +1563,739 @@ def chart_throughput_vs_resources():
     fig.savefig(CHARTS / "12_throughput_vs_resources.png", bbox_inches="tight")
     plt.close()
     print("  -> 12_throughput_vs_resources.png")
+
+
+# ── Chart 13: Worker Load Balance ────────────────────────────────────
+
+
+def chart_worker_balance():
+    """Bar chart: per-worker throughput showing load distribution across workers."""
+    test_data = {}  # {test_label: {broker: [per_worker_rates]}}
+
+    for b in BROKERS:
+        # Producer throughput (median run)
+        rates_by_run = []
+        for i in range(1, REPS + 1):
+            d = load(f"{b}_throughput_run{i}.json")
+            if d and "per_worker" in d:
+                rates_by_run.append(d)
+        if rates_by_run:
+            # Pick median run by aggregate_rate
+            rates_by_run.sort(key=lambda r: r.get("aggregate_rate", 0))
+            median_run = rates_by_run[len(rates_by_run) // 2]
+            workers = [w["avg_rate"] for w in median_run["per_worker"]]
+            test_data.setdefault("Producer", {})[b] = workers
+
+        # Consumer throughput (median run)
+        rates_by_run = []
+        for i in range(1, REPS + 1):
+            d = load(f"{b}_consumer_run{i}.json")
+            if d and "per_worker" in d:
+                rates_by_run.append(d)
+        if rates_by_run:
+            rates_by_run.sort(key=lambda r: r.get("aggregate_rate", 0))
+            median_run = rates_by_run[len(rates_by_run) // 2]
+            workers = [w["avg_rate"] for w in median_run["per_worker"]]
+            test_data.setdefault("Consumer", {})[b] = workers
+
+        # ProdCon producer side
+        d = load(f"{b}_prodcon.json")
+        if d and "producer" in d and "per_worker" in d["producer"]:
+            workers = [w["avg_rate"] for w in d["producer"]["per_worker"]]
+            test_data.setdefault("ProdCon (prod)", {})[b] = workers
+
+    if not test_data:
+        return
+
+    n_tests = len(test_data)
+    fig, axes = plt.subplots(1, n_tests, figsize=(6 * n_tests, 5), squeeze=False)
+    fig.suptitle("Worker Load Balance — Per-Worker Throughput", fontweight="bold", fontsize=14)
+
+    for idx, (test_label, broker_data) in enumerate(test_data.items()):
+        ax = axes[0][idx]
+        ax.set_title(test_label, fontsize=11)
+
+        for bi, b in enumerate(BROKERS):
+            if b not in broker_data:
+                continue
+            rates = broker_data[b]
+            n_workers = len(rates)
+            x = np.arange(n_workers) + bi * (n_workers + 1)
+            bars = ax.bar(x, rates, color=COLORS[b], alpha=0.85, label=b.upper())
+            mean_rate = np.mean(rates)
+            ax.axhline(mean_rate, color=COLORS[b], linestyle="--", alpha=0.5, linewidth=1)
+
+            # Annotate stddev / CV
+            if len(rates) > 1:
+                cv = np.std(rates) / mean_rate * 100 if mean_rate > 0 else 0
+                ax.text(
+                    np.mean(x), max(rates) * 1.05,
+                    f"CV={cv:.1f}%",
+                    ha="center", fontsize=8, color=COLORS[b], fontweight="bold",
+                )
+
+        ax.set_ylabel("Messages / sec")
+        ax.set_xlabel("Worker index")
+        ax.legend(fontsize=9)
+        ax.grid(axis="y", alpha=0.2)
+
+    _annotate_direction(axes[0][0], "\u2191 Higher + even is better", loc="upper left")
+
+    fig.text(
+        0.5, -0.03,
+        "Per-worker throughput reveals partition/queue distribution imbalance.\n"
+        "CV (Coefficient of Variation) < 10% = good balance. Dashed line = mean rate.",
+        ha="center", fontsize=8, color="#888", style="italic",
+    )
+
+    plt.tight_layout()
+    fig.savefig(CHARTS / "13_worker_balance.png", bbox_inches="tight")
+    plt.close()
+    print("  -> 13_worker_balance.png")
+
+
+# ── Chart 14: Error Rate Breakdown ───────────────────────────────────
+
+
+def chart_error_breakdown():
+    """Grouped bar: error counts across test types and memory stress levels."""
+    errors = {}  # {test_label: {broker: error_count}}
+
+    for b in BROKERS:
+        # Throughput errors (sum across runs)
+        total_tp_err = 0
+        for i in range(1, REPS + 1):
+            d = load(f"{b}_throughput_run{i}.json")
+            if d:
+                total_tp_err += d.get("total_errors", 0)
+        errors.setdefault("Throughput", {})[b] = total_tp_err
+
+        # Consumer errors
+        total_cons_err = 0
+        for i in range(1, REPS + 1):
+            d = load(f"{b}_consumer_run{i}.json")
+            if d:
+                total_cons_err += d.get("total_errors", 0)
+        errors.setdefault("Consumer", {})[b] = total_cons_err
+
+        # ProdCon errors
+        d = load(f"{b}_prodcon.json")
+        if d and "producer" in d:
+            errors.setdefault("ProdCon", {})[b] = d["producer"].get("total_errors", 0)
+
+        # Memory stress levels
+        for mem in ["4g", "2g", "1g", "512m"]:
+            d = load(f"{b}_mem_{mem}.json")
+            if d:
+                errors.setdefault(f"Mem {mem}", {})[b] = d.get("total_errors", 0)
+
+    if not errors:
+        return
+
+    test_labels = list(errors.keys())
+    x = np.arange(len(test_labels))
+    w = 0.3
+
+    fig, ax = plt.subplots(figsize=(12, 5))
+    fig.suptitle("Error Rate Breakdown by Test Type", fontweight="bold", fontsize=14)
+
+    for i, b in enumerate(BROKERS):
+        vals = [errors.get(t, {}).get(b, 0) for t in test_labels]
+        offset = (i - (len(BROKERS) - 1) / 2) * w
+        bars = ax.bar(x + offset, vals, w, label=b.upper(), color=COLORS[b], alpha=0.85)
+        for bar, v in zip(bars, vals):
+            if v > 0:
+                ax.text(
+                    bar.get_x() + bar.get_width() / 2, bar.get_height(),
+                    f"{v:,}", ha="center", va="bottom", fontsize=8, fontweight="bold",
+                )
+
+    ax.set_ylabel("Total Errors")
+    ax.set_xticks(x)
+    ax.set_xticklabels(test_labels, rotation=30, ha="right")
+    ax.legend()
+    ax.grid(axis="y", alpha=0.2)
+    _annotate_direction(ax, "\u2193 Lower is better")
+
+    fig.text(
+        0.5, -0.05,
+        "Total error counts per benchmark type (summed across all runs/workers).\n"
+        "Errors include produce failures, timeouts, and broker rejections under load.",
+        ha="center", fontsize=8, color="#888", style="italic",
+    )
+
+    plt.tight_layout()
+    fig.savefig(CHARTS / "14_error_breakdown.png", bbox_inches="tight")
+    plt.close()
+    print("  -> 14_error_breakdown.png")
+
+
+# ── Chart 15: Throughput Stability ───────────────────────────────────
+
+
+def chart_throughput_stability():
+    """Bar chart with error bars: throughput across 3 repetitions showing stability."""
+    data = {}  # {broker: {"producer": [rates], "consumer": [rates]}}
+
+    for b in BROKERS:
+        prod_rates, cons_rates = [], []
+        for i in range(1, REPS + 1):
+            d = load(f"{b}_throughput_run{i}.json")
+            if d and "aggregate_rate" in d:
+                prod_rates.append(d["aggregate_rate"])
+            d = load(f"{b}_consumer_run{i}.json")
+            if d and "aggregate_rate" in d:
+                cons_rates.append(d["aggregate_rate"])
+        if prod_rates or cons_rates:
+            data[b] = {"producer": prod_rates, "consumer": cons_rates}
+
+    if not data:
+        return
+
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5))
+    fig.suptitle("Throughput Stability Across Repetitions", fontweight="bold", fontsize=14)
+
+    # Producer stability
+    for bi, b in enumerate(BROKERS):
+        if b not in data:
+            continue
+        rates = data[b]["producer"]
+        if not rates:
+            continue
+        mean_r = np.mean(rates)
+        std_r = np.std(rates) if len(rates) > 1 else 0
+        cv = (std_r / mean_r * 100) if mean_r > 0 else 0
+
+        ax1.bar(bi, mean_r, color=COLORS[b], alpha=0.85, width=0.5, label=b.upper())
+        ax1.errorbar(bi, mean_r, yerr=std_r, color="white", capsize=8, capthick=2, linewidth=2)
+
+        # Individual run dots
+        for rate in rates:
+            ax1.scatter(bi, rate, color="white", s=30, zorder=5, edgecolors=COLORS[b])
+
+        ax1.text(bi, mean_r + std_r + mean_r * 0.02,
+                 f"CV={cv:.1f}%\nσ={std_r:,.0f}",
+                 ha="center", fontsize=8, fontweight="bold")
+
+    ax1.set_title("Producer Throughput")
+    ax1.set_ylabel("Messages / sec")
+    ax1.set_xticks(range(len(BROKERS)))
+    ax1.set_xticklabels([b.upper() for b in BROKERS if b in data])
+    ax1.legend(fontsize=9)
+    ax1.grid(axis="y", alpha=0.2)
+
+    # Consumer stability
+    for bi, b in enumerate(BROKERS):
+        if b not in data:
+            continue
+        rates = data[b]["consumer"]
+        if not rates:
+            continue
+        mean_r = np.mean(rates)
+        std_r = np.std(rates) if len(rates) > 1 else 0
+        cv = (std_r / mean_r * 100) if mean_r > 0 else 0
+
+        ax2.bar(bi, mean_r, color=COLORS[b], alpha=0.85, width=0.5, label=b.upper())
+        ax2.errorbar(bi, mean_r, yerr=std_r, color="white", capsize=8, capthick=2, linewidth=2)
+
+        for rate in rates:
+            ax2.scatter(bi, rate, color="white", s=30, zorder=5, edgecolors=COLORS[b])
+
+        ax2.text(bi, mean_r + std_r + mean_r * 0.02,
+                 f"CV={cv:.1f}%\nσ={std_r:,.0f}",
+                 ha="center", fontsize=8, fontweight="bold")
+
+    ax2.set_title("Consumer Throughput")
+    ax2.set_ylabel("Messages / sec")
+    ax2.set_xticks(range(len(BROKERS)))
+    ax2.set_xticklabels([b.upper() for b in BROKERS if b in data])
+    ax2.legend(fontsize=9)
+    ax2.grid(axis="y", alpha=0.2)
+
+    _annotate_direction(ax1, "\u2191 Higher + stable is better", loc="upper left")
+    _annotate_direction(ax2, "\u2191 Higher + stable is better", loc="upper left")
+
+    fig.text(
+        0.5, -0.03,
+        f"Mean throughput ± stddev across {REPS} repetitions. White dots = individual runs.\n"
+        "CV (Coefficient of Variation) < 5% = highly stable. Higher CV = less predictable performance.",
+        ha="center", fontsize=8, color="#888", style="italic",
+    )
+
+    plt.tight_layout()
+    fig.savefig(CHARTS / "15_throughput_stability.png", bbox_inches="tight")
+    plt.close()
+    print("  -> 15_throughput_stability.png")
+
+
+# ── Chart 16: ProdCon Balance Ratio ──────────────────────────────────
+
+
+def chart_prodcon_balance():
+    """Stacked bar: producer vs consumer rate ratio during simultaneous load."""
+    data = {}
+
+    for b in BROKERS:
+        d = load(f"{b}_prodcon.json")
+        if d and "producer" in d and "consumer" in d:
+            prod_rate = d["producer"].get("aggregate_rate", 0)
+            cons_rate = d["consumer"].get("aggregate_rate", 0)
+            if prod_rate > 0 or cons_rate > 0:
+                data[b] = {"producer": prod_rate, "consumer": cons_rate}
+
+    if not data:
+        return
+
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 5))
+    fig.suptitle("Producer / Consumer Balance Ratio", fontweight="bold", fontsize=14)
+
+    brokers = [b for b in BROKERS if b in data]
+
+    # Left: stacked bar showing absolute rates
+    for i, b in enumerate(brokers):
+        prod = data[b]["producer"]
+        cons = data[b]["consumer"]
+        ax1.bar(i, prod, color=COLORS[b], alpha=0.85, width=0.5, label="Producer" if i == 0 else None)
+        ax1.bar(i, cons, bottom=prod, color=COLORS[b], alpha=0.45, width=0.5,
+                label="Consumer" if i == 0 else None, hatch="//")
+        ax1.text(i, prod / 2, f"P: {prod:,.0f}", ha="center", va="center", fontsize=8, fontweight="bold")
+        ax1.text(i, prod + cons / 2, f"C: {cons:,.0f}", ha="center", va="center", fontsize=8, fontweight="bold")
+
+    ax1.set_xticks(range(len(brokers)))
+    ax1.set_xticklabels([b.upper() for b in brokers])
+    ax1.set_ylabel("Messages / sec")
+    ax1.set_title("Absolute Rates (Stacked)")
+    ax1.legend(fontsize=9)
+    ax1.grid(axis="y", alpha=0.2)
+
+    # Right: ratio bar (producer/consumer)
+    ratios = []
+    for b in brokers:
+        prod = data[b]["producer"]
+        cons = data[b]["consumer"]
+        ratios.append(prod / cons if cons > 0 else 0)
+
+    bars = ax2.bar(range(len(brokers)), ratios, color=[COLORS[b] for b in brokers], width=0.5, alpha=0.85)
+    ax2.axhline(1.0, color="#888", linestyle="--", linewidth=1, label="Balanced (1:1)")
+    for i, (bar, ratio) in enumerate(zip(bars, ratios)):
+        ax2.text(
+            bar.get_x() + bar.get_width() / 2, bar.get_height(),
+            f"{ratio:.2f}x", ha="center", va="bottom", fontsize=10, fontweight="bold",
+        )
+    ax2.set_xticks(range(len(brokers)))
+    ax2.set_xticklabels([b.upper() for b in brokers])
+    ax2.set_ylabel("Producer / Consumer Ratio")
+    ax2.set_title("Backpressure Indicator")
+    ax2.legend(fontsize=9)
+    ax2.grid(axis="y", alpha=0.2)
+
+    fig.text(
+        0.5, -0.03,
+        "Left: absolute producer + consumer rates during simultaneous load.\n"
+        "Right: ratio > 1 means producer outpaces consumer (backpressure building). Ratio = 1 means balanced.",
+        ha="center", fontsize=8, color="#888", style="italic",
+    )
+
+    plt.tight_layout()
+    fig.savefig(CHARTS / "16_prodcon_balance.png", bbox_inches="tight")
+    plt.close()
+    print("  -> 16_prodcon_balance.png")
+
+
+# ── Chart 17: Network I/O Timeline ──────────────────────────────────
+
+
+def _parse_net_io(net_str):
+    """Parse network I/O string like '1.7kB / 126B' -> (rx_mb, tx_mb)."""
+    parts = net_str.split("/")
+    if len(parts) != 2:
+        return 0.0, 0.0
+
+    def _to_mb(s):
+        s = s.strip()
+        if "GB" in s:
+            return float(s.replace("GB", "").strip()) * 1024
+        elif "MB" in s:
+            return float(s.replace("MB", "").strip())
+        elif "kB" in s:
+            return float(s.replace("kB", "").strip()) / 1024
+        elif "B" in s:
+            return float(s.replace("B", "").strip()) / (1024 * 1024)
+        return 0.0
+
+    return _to_mb(parts[0]), _to_mb(parts[1])
+
+
+def chart_network_io_timeline():
+    """Time-series chart: network receive/transmit over time from docker_stats.csv."""
+    import csv
+
+    csv_path = RESULTS / "docker_stats.csv"
+    if not csv_path.exists():
+        return
+
+    container_data = {}
+    target_containers = {"bench-kafka", "bench-nats"}
+
+    with open(csv_path) as f:
+        reader = csv.reader(f)
+        next(reader, None)  # skip header
+        for row in reader:
+            if len(row) < 6:
+                continue
+            try:
+                ts = int(row[_DOCKER_COLS["timestamp"]])
+                container = row[_DOCKER_COLS["container"]]
+                if container not in target_containers:
+                    continue
+                rx_mb, tx_mb = _parse_net_io(row[_DOCKER_COLS["net_io"]])
+
+                if container not in container_data:
+                    container_data[container] = []
+                container_data[container].append((ts, rx_mb, tx_mb))
+            except (ValueError, IndexError):
+                continue
+
+    if not container_data:
+        return
+
+    all_ts = []
+    for points in container_data.values():
+        all_ts.extend(p[0] for p in points)
+    t0 = min(all_ts) if all_ts else 0
+
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(14, 8), sharex=True)
+    fig.suptitle("Network I/O Over Time (from docker_stats.csv)", fontweight="bold", fontsize=14)
+
+    container_colors = {"bench-kafka": KAFKA_COLOR, "bench-nats": NATS_COLOR}
+
+    for container, points in sorted(container_data.items()):
+        points.sort(key=lambda p: p[0])
+        color = container_colors.get(container, "#888")
+        label = container.replace("bench-", "").upper()
+
+        segments_t, segments_rx, segments_tx = [], [], []
+        seg_t, seg_rx, seg_tx = [], [], []
+
+        for ts, rx, tx in points:
+            elapsed = (ts - t0) / 60.0
+            if seg_t and elapsed - seg_t[-1] > 0.5:
+                segments_t.append(seg_t)
+                segments_rx.append(seg_rx)
+                segments_tx.append(seg_tx)
+                seg_t, seg_rx, seg_tx = [], [], []
+            seg_t.append(elapsed)
+            seg_rx.append(rx)
+            seg_tx.append(tx)
+
+        if seg_t:
+            segments_t.append(seg_t)
+            segments_rx.append(seg_rx)
+            segments_tx.append(seg_tx)
+
+        for j, (st, sr, stx) in enumerate(zip(segments_t, segments_rx, segments_tx)):
+            lbl = label if j == 0 else None
+            ax1.plot(st, sr, color=color, label=lbl, linewidth=1.0, alpha=0.8)
+            ax1.fill_between(st, sr, alpha=0.1, color=color)
+            ax2.plot(st, stx, color=color, label=lbl, linewidth=1.0, alpha=0.8)
+            ax2.fill_between(st, stx, alpha=0.1, color=color)
+
+    ax1.set_ylabel("Cumulative Received (MB)")
+    ax1.set_title("Network I/O — Receive (RX)")
+    ax1.legend(fontsize=10, loc="upper right")
+    ax1.grid(axis="both", alpha=0.2)
+
+    ax2.set_ylabel("Cumulative Transmitted (MB)")
+    ax2.set_title("Network I/O — Transmit (TX)")
+    ax2.set_xlabel("Elapsed Time (minutes)")
+    ax2.legend(fontsize=10, loc="upper right")
+    ax2.grid(axis="both", alpha=0.2)
+
+    fig.text(
+        0.5, -0.03,
+        "Cumulative network receive/transmit reported by Docker's network accounting.\n"
+        "Shows bandwidth consumption patterns — spikes correlate with benchmark phases.\n"
+        "Important for estimating network costs in cloud deployments.",
+        ha="center", fontsize=8, color="#888", style="italic",
+    )
+
+    plt.tight_layout()
+    fig.savefig(CHARTS / "17_network_io_timeline.png", bbox_inches="tight")
+    plt.close()
+    print("  -> 17_network_io_timeline.png")
+
+
+# ── Chart 18: Memory Headroom ────────────────────────────────────────
+
+
+def chart_memory_headroom():
+    """Time-series chart: memory usage percentage over time showing headroom."""
+    import csv
+
+    csv_path = RESULTS / "docker_stats.csv"
+    if not csv_path.exists():
+        return
+
+    container_data = {}
+    target_containers = {"bench-kafka", "bench-nats"}
+
+    with open(csv_path) as f:
+        reader = csv.reader(f)
+        next(reader, None)  # skip header
+        for row in reader:
+            if len(row) < 5:
+                continue
+            try:
+                ts = int(row[_DOCKER_COLS["timestamp"]])
+                container = row[_DOCKER_COLS["container"]]
+                if container not in target_containers:
+                    continue
+                mem_pct = float(row[_DOCKER_COLS["mem_pct"]].replace("%", ""))
+
+                if container not in container_data:
+                    container_data[container] = []
+                container_data[container].append((ts, mem_pct))
+            except (ValueError, IndexError):
+                continue
+
+    if not container_data:
+        return
+
+    all_ts = []
+    for points in container_data.values():
+        all_ts.extend(p[0] for p in points)
+    t0 = min(all_ts) if all_ts else 0
+
+    fig, ax = plt.subplots(figsize=(14, 5))
+    fig.suptitle("Memory Headroom — Usage % Over Time", fontweight="bold", fontsize=14)
+
+    container_colors = {"bench-kafka": KAFKA_COLOR, "bench-nats": NATS_COLOR}
+
+    for container, points in sorted(container_data.items()):
+        points.sort(key=lambda p: p[0])
+        color = container_colors.get(container, "#888")
+        label = container.replace("bench-", "").upper()
+
+        segments_t, segments_pct = [], []
+        seg_t, seg_pct = [], []
+
+        for ts, pct in points:
+            elapsed = (ts - t0) / 60.0
+            if seg_t and elapsed - seg_t[-1] > 0.5:
+                segments_t.append(seg_t)
+                segments_pct.append(seg_pct)
+                seg_t, seg_pct = [], []
+            seg_t.append(elapsed)
+            seg_pct.append(pct)
+
+        if seg_t:
+            segments_t.append(seg_t)
+            segments_pct.append(seg_pct)
+
+        peak_pct = max(p[1] for p in points)
+        for j, (st, sp) in enumerate(zip(segments_t, segments_pct)):
+            lbl = f"{label} (peak {peak_pct:.1f}%)" if j == 0 else None
+            ax.plot(st, sp, color=color, label=lbl, linewidth=1.0, alpha=0.8)
+            ax.fill_between(st, sp, alpha=0.1, color=color)
+
+    # Danger zones
+    ax.axhline(80, color="#FF6600", linestyle="--", linewidth=1, alpha=0.6, label="Warning (80%)")
+    ax.axhline(95, color="#FF0000", linestyle="--", linewidth=1, alpha=0.6, label="Critical (95%)")
+
+    ax.set_ylabel("Memory Usage %")
+    ax.set_xlabel("Elapsed Time (minutes)")
+    ax.set_ylim(0, 105)
+    ax.legend(fontsize=10, loc="upper right")
+    ax.grid(axis="both", alpha=0.2)
+    _annotate_direction(ax, "\u2193 Lower is better", loc="upper left")
+
+    fig.text(
+        0.5, -0.03,
+        "Shows how close each broker gets to its container memory limit during the full benchmark.\n"
+        "Crossing 80% = danger zone. Crossing 95% = likely OOM kill imminent.\n"
+        "Lower peak = more headroom for traffic spikes in production.",
+        ha="center", fontsize=8, color="#888", style="italic",
+    )
+
+    plt.tight_layout()
+    fig.savefig(CHARTS / "18_memory_headroom.png", bbox_inches="tight")
+    plt.close()
+    print("  -> 18_memory_headroom.png")
+
+
+# ── Chart 19: Scaling Efficiency ─────────────────────────────────────
+
+
+def chart_scaling_efficiency():
+    """Line chart: throughput-per-CPU-core at each CPU limit, showing diminishing returns."""
+    data = {}
+    for b in BROKERS:
+        d = load(f"{b}_scaling.json")
+        if d and isinstance(d, list):
+            data[b] = d
+
+    if not data:
+        return
+
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5))
+    fig.suptitle("Scaling Efficiency — Throughput per CPU Core", fontweight="bold", fontsize=14)
+
+    # Left: throughput per core at each CPU level
+    for b in BROKERS:
+        if b not in data:
+            continue
+        entries = [e for e in data[b] if e.get("status") == "PASS"]
+        if not entries:
+            continue
+
+        cpus = [e["cpu_limit"] for e in entries]
+        tp_per_core = [e["throughput"] / e["cpu_limit"] for e in entries]
+
+        ax1.plot(cpus, tp_per_core, color=COLORS[b], marker="o", linewidth=2.5,
+                 label=b.upper(), markersize=9)
+        for xi, yi in zip(cpus, tp_per_core):
+            ax1.annotate(
+                f"{yi:,.0f}", (xi, yi), textcoords="offset points", xytext=(0, 10),
+                ha="center", fontsize=8, color=COLORS[b], fontweight="bold",
+            )
+
+    ax1.set_xlabel("CPU Limit (cores)")
+    ax1.set_ylabel("Messages / sec / core")
+    ax1.set_title("Per-Core Efficiency")
+    ax1.legend(fontsize=10)
+    ax1.grid(axis="both", alpha=0.2)
+    ax1.invert_xaxis()
+    _annotate_direction(ax1, "\u2191 Higher is better")
+
+    # Right: efficiency ratio (normalized to highest CPU)
+    for b in BROKERS:
+        if b not in data:
+            continue
+        entries = sorted(
+            [e for e in data[b] if e.get("status") == "PASS"],
+            key=lambda e: -e["cpu_limit"],
+        )
+        if not entries:
+            continue
+
+        base_efficiency = entries[0]["throughput"] / entries[0]["cpu_limit"]
+        cpus = [e["cpu_limit"] for e in entries]
+        efficiency_pct = [
+            (e["throughput"] / e["cpu_limit"]) / base_efficiency * 100
+            for e in entries
+        ]
+
+        ax2.plot(cpus, efficiency_pct, color=COLORS[b], marker="s", linewidth=2.5,
+                 label=b.upper(), markersize=9)
+        for xi, yi in zip(cpus, efficiency_pct):
+            ax2.annotate(
+                f"{yi:.0f}%", (xi, yi), textcoords="offset points", xytext=(0, 10),
+                ha="center", fontsize=8, color=COLORS[b], fontweight="bold",
+            )
+
+    ax2.axhline(100, color="#888", linestyle="--", linewidth=1, alpha=0.5, label="Baseline (max CPU)")
+    ax2.set_xlabel("CPU Limit (cores)")
+    ax2.set_ylabel("Efficiency % (vs max CPU)")
+    ax2.set_title("Efficiency Degradation")
+    ax2.legend(fontsize=10)
+    ax2.grid(axis="both", alpha=0.2)
+    ax2.invert_xaxis()
+
+    fig.text(
+        0.5, -0.03,
+        "Left: absolute throughput-per-core at each CPU limit — the 'knee' shows diminishing returns.\n"
+        "Right: efficiency normalized to 100% at maximum CPU. Drop below 100% = overhead from resource contention.\n"
+        "Flatter curve = better scaling. Sharp drop = broker struggles with limited resources.",
+        ha="center", fontsize=8, color="#888", style="italic",
+    )
+
+    plt.tight_layout()
+    fig.savefig(CHARTS / "19_scaling_efficiency.png", bbox_inches="tight")
+    plt.close()
+    print("  -> 19_scaling_efficiency.png")
+
+
+# ── Chart 20: Latency Load Context ──────────────────────────────────
+
+
+def chart_latency_context():
+    """Table chart: latency measurement context — load%, target rate, samples."""
+    data = {}
+    for b in BROKERS:
+        d = load(f"{b}_latency.json")
+        if d:
+            data[b] = d
+
+    if not data:
+        return
+
+    fig, ax = plt.subplots(figsize=(10, 4))
+    fig.suptitle("Latency Measurement Context", fontweight="bold", fontsize=14)
+
+    # Build table data
+    columns = ["Metric"] + [b.upper() for b in BROKERS if b in data]
+    rows = []
+    metrics = [
+        ("Load %", "load_pct", "{:.0f}%"),
+        ("Target Rate (msg/s)", "target_rate", "{:,.0f}"),
+        ("Samples Collected", "samples", "{:,.0f}"),
+        ("Messages Sent", "sent", "{:,.0f}"),
+        ("p50 Latency (µs)", "p50_us", "{:,.0f}"),
+        ("p95 Latency (µs)", "p95_us", "{:,.0f}"),
+        ("p99 Latency (µs)", "p99_us", "{:,.0f}"),
+        ("p99.9 Latency (µs)", "p999_us", "{:,.0f}"),
+        ("Max Latency (µs)", "max_us", "{:,.0f}"),
+    ]
+
+    for label, key, fmt in metrics:
+        row = [label]
+        for b in BROKERS:
+            if b in data and key in data[b]:
+                val = data[b][key]
+                row.append(fmt.format(val))
+            else:
+                row.append("—")
+        rows.append(row)
+
+    ax.axis("off")
+    table = ax.table(
+        cellText=rows,
+        colLabels=columns,
+        cellLoc="center",
+        loc="center",
+    )
+    table.auto_set_font_size(False)
+    table.set_fontsize(10)
+    table.scale(1, 1.8)
+
+    # Style the table
+    for key, cell in table.get_celld().items():
+        cell.set_edgecolor("#555")
+        if key[0] == 0:  # Header row
+            cell.set_facecolor("#444")
+            cell.set_text_props(fontweight="bold", color="#ccc")
+        else:
+            cell.set_facecolor("#2d2d2d")
+            cell.set_text_props(color="#ccc")
+
+    # Color broker columns
+    broker_cols = {i + 1: b for i, b in enumerate(BROKERS) if b in data}
+    for (row_idx, col_idx), cell in table.get_celld().items():
+        if col_idx in broker_cols and row_idx > 0:
+            broker = broker_cols[col_idx]
+            cell.set_text_props(color=COLORS[broker])
+
+    fig.text(
+        0.5, 0.02,
+        "Full context for the latency test — at what load % and target rate was the measurement taken.\n"
+        "This context is critical for interpreting the latency numbers in Chart 04.",
+        ha="center", fontsize=8, color="#888", style="italic",
+    )
+
+    plt.tight_layout()
+    fig.savefig(CHARTS / "20_latency_context.png", bbox_inches="tight")
+    plt.close()
+    print("  -> 20_latency_context.png")
 
 
 # ── Cross-Scenario Comparison Charts ──────────────────────────────────
@@ -2192,20 +2937,18 @@ def _load_scenario_csv(scenario_name):
 
     with open(p) as f:
         reader = csv.reader(f)
-        header = next(reader, None)
-        if not header:
-            return {}
+        next(reader, None)  # skip header
         for row in reader:
-            if len(row) < 8:
+            if len(row) < 7:
                 continue
             try:
-                ts = int(row[0])
-                container = row[1]
+                ts = int(row[_DOCKER_COLS["timestamp"]])
+                container = row[_DOCKER_COLS["container"]]
                 if container not in target_containers:
                     continue
-                cpu = float(row[2].replace("%", ""))
-                mem_mb = _parse_mem_usage(row[3])
-                read_mb, write_mb = _parse_block_io(row[7])
+                cpu = float(row[_DOCKER_COLS["cpu_pct"]].replace("%", ""))
+                mem_mb = _parse_mem_usage(row[_DOCKER_COLS["mem_usage"]])
+                read_mb, write_mb = _parse_block_io(row[_DOCKER_COLS["block_io"]])
 
                 if container not in container_data:
                     container_data[container] = []
@@ -2381,11 +3124,11 @@ def compare_throughput_vs_resources(scenarios, out_dir):
                         reader = csv.reader(f)
                         next(reader, None)
                         for row in reader:
-                            if len(row) < 5 or row[1] != container_name:
+                            if len(row) < 5 or row[_DOCKER_COLS["container"]] != container_name:
                                 continue
                             try:
-                                cpu_val = float(row[2].replace("%", ""))
-                                mem_val = _parse_mem_usage(row[3])
+                                cpu_val = float(row[_DOCKER_COLS["cpu_pct"]].replace("%", ""))
+                                mem_val = _parse_mem_usage(row[_DOCKER_COLS["mem_usage"]])
                                 max_cpu = max(max_cpu, cpu_val)
                                 max_mem = max(max_mem, mem_val)
                             except (ValueError, IndexError):
@@ -2607,6 +3350,14 @@ def main():
     chart_resource_scaling()
     chart_disk_io_timeline()
     chart_throughput_vs_resources()
+    chart_worker_balance()
+    chart_error_breakdown()
+    chart_throughput_stability()
+    chart_prodcon_balance()
+    chart_network_io_timeline()
+    chart_memory_headroom()
+    chart_scaling_efficiency()
+    chart_latency_context()
 
     print(f"\nAll charts saved to {CHARTS}/")
 
