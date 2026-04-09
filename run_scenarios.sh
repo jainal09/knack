@@ -122,9 +122,11 @@ log "Master log: $MASTER_LOG"
 # ─────────────────────────────────────────────────────────────────────────────
 
 # ─── Ctrl+C guard ───────────────────────────────────────────────────────────
-# All I/O goes directly to /dev/tty so it bypasses the exec > >(tee) redirect.
-# Single-keypress detection: y = abort, n / Enter / Esc = resume.
-# A second Ctrl+C during the prompt force-kills immediately.
+# The child (run_all.sh) runs via setsid in its own session, so Ctrl+C from
+# the terminal only reaches THIS process — the child keeps running untouched.
+# On abort we send SIGTERM to the child's process group to clean up.
+_CHILD_PID=""
+
 _handle_sigint() {
   printf "\n\033[1;33m⚠  Ctrl+C detected. Abort benchmark? [y = abort / n or Esc = resume] \033[0m" >/dev/tty
   trap - INT  # second Ctrl+C during prompt kills immediately
@@ -136,6 +138,9 @@ _handle_sigint() {
     case "$key" in
       [yY])
         printf "\n\033[1;31mAborting benchmark run...\033[0m\n" >/dev/tty
+        if [[ -n "$_CHILD_PID" ]] && kill -0 "$_CHILD_PID" 2>/dev/null; then
+          kill -TERM -- -"$_CHILD_PID" 2>/dev/null || kill -TERM "$_CHILD_PID" 2>/dev/null || true
+        fi
         exit 130
         ;;
       [nN]|"")
@@ -179,11 +184,22 @@ for s in "${ACTIVE_SCENARIOS[@]}"; do
 
   mkdir -p "$RESULTS_DIR"
 
-  # Run the full benchmark suite with forwarded args
-  if bash "$PROJECT_ROOT/run_all.sh" "${FORWARD_ARGS[@]}"; then
+  # Run child in its own session (setsid) so Ctrl+C doesn't reach it.
+  # Output still flows through our stdout/stderr (the tee pipe).
+  setsid bash "$PROJECT_ROOT/run_all.sh" "${FORWARD_ARGS[@]}" &
+  _CHILD_PID=$!
+
+  # Wait for the child. Signals interrupt wait, so loop until child exits.
+  _child_exit=0
+  while kill -0 "$_CHILD_PID" 2>/dev/null; do
+    wait "$_CHILD_PID" 2>/dev/null && _child_exit=$? || _child_exit=$?
+  done
+  _CHILD_PID=""
+
+  if [[ $_child_exit -eq 0 ]]; then
     printf "${_GREEN}[%s] ✔ Scenario '${name}' PASSED. Results in results/${name}/${_RST}\n" "$(date '+%Y-%m-%d %H:%M:%S')"
   else
-    printf "${_RED}[%s] ✘ Scenario '${name}' FAILED (exit code $?). Partial results in results/${name}/${_RST}\n" "$(date '+%Y-%m-%d %H:%M:%S')"
+    printf "${_RED}[%s] ✘ Scenario '${name}' FAILED (exit code ${_child_exit}). Partial results in results/${name}/${_RST}\n" "$(date '+%Y-%m-%d %H:%M:%S')"
   fi
 
   echo ""
