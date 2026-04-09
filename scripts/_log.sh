@@ -13,6 +13,14 @@ _CYAN='\033[1;36m'
 _BLUE='\033[1;34m'
 _MAG='\033[1;35m'
 
+# Spinner output target: /dev/tty if available (interactive), else stderr.
+# Background processes launched via ( ... ) & may not have a controlling tty.
+if [[ -w /dev/tty ]] 2>/dev/null; then
+  _TTY_OUT=/dev/tty
+else
+  _TTY_OUT=/dev/stderr
+fi
+
 log()     { printf "${_DIM}[%s]${_RST} %s\n" "$(date '+%Y-%m-%d %H:%M:%S')" "$*"; }
 log_step()  { printf "${_CYAN}[%s] ► %s${_RST}\n" "$(date '+%Y-%m-%d %H:%M:%S')" "$*"; }
 log_ok()    { printf "${_GREEN}[%s] ✔ %s${_RST}\n" "$(date '+%Y-%m-%d %H:%M:%S')" "$*"; }
@@ -31,13 +39,14 @@ _start_spinner() {
   _SPINNER_MSG_FILE=$(mktemp /tmp/.spinner_msg.XXXXXX)
   echo "$1" > "$_SPINNER_MSG_FILE"
   local msgfile="$_SPINNER_MSG_FILE"
+  local tty_out="$_TTY_OUT"
   (
     local i=0 len=${#_SPIN_FRAMES[@]}
     while true; do
       local frame="${_SPIN_FRAMES[i % len]}"
       local msg
       msg=$(cat "$msgfile" 2>/dev/null) || msg=""
-      printf "\r  \033[1;36m%s\033[0m \033[1;97m%s\033[0m        " "$frame" "$msg" > /dev/tty
+      printf "\r  \033[1;36m%s\033[0m \033[1;97m%s\033[0m        " "$frame" "$msg" > "$tty_out"
       sleep 0.12
       i=$(( i + 1 ))
     done
@@ -54,7 +63,7 @@ _update_spinner() {
 _stop_spinner() {
   kill "$_SPINNER_PID" 2>/dev/null; wait "$_SPINNER_PID" 2>/dev/null || true
   rm -f "$_SPINNER_MSG_FILE" 2>/dev/null
-  printf "\r  \033[1;32m✔ %s\033[0m                                                  \n" "$1" > /dev/tty
+  printf "\r  \033[1;32m✔ %s\033[0m                                                  \n" "$1" > "$_TTY_OUT"
 }
 
 # wait_with_progress SECONDS "message"
