@@ -25,24 +25,24 @@
 ## Sample Output
 
 <p align="center">
-  <img src="sample-report/large/charts/06_scorecard.png" alt="Benchmark Scorecard" width="800">
+  <img src="sample-report/large/charts/04_latency.png" alt="End-to-End Latency — Kafka vs NATS" width="800">
 </p>
 
 <details>
 <summary><strong>More charts (click to expand)</strong></summary>
 <br>
 
-| Throughput | Latency |
+| Scorecard | Throughput |
 |:---:|:---:|
-| ![Throughput](sample-report/large/charts/03_throughput.png) | ![Latency](sample-report/large/charts/04_latency.png) |
+| ![Scorecard](sample-report/large/charts/06_scorecard.png) | ![Throughput](sample-report/large/charts/03_throughput.png) |
 
-| Idle Footprint | Memory Stress |
+| Resource Timeline | Cross-Scenario Latency |
 |:---:|:---:|
-| ![Idle](sample-report/large/charts/01_idle_footprint.png) | ![Memory Stress](sample-report/large/charts/05_memory_stress.png) |
+| ![Resource Timeline](sample-report/large/charts/09_resource_timeline.png) | ![Latency Comparison](sample-report/comparison/cmp_05_latency.png) |
 
-| Resource Scaling | Scaling Efficiency |
+| Memory Stress | Resource Scaling |
 |:---:|:---:|
-| ![Resource Scaling](sample-report/large/charts/10_resource_scaling.png) | ![Scaling Efficiency](sample-report/large/charts/19_scaling_efficiency.png) |
+| ![Memory Stress](sample-report/large/charts/05_memory_stress.png) | ![Resource Scaling](sample-report/large/charts/10_resource_scaling.png) |
 
 | Cross-Scenario Comparison |
 |:---:|
