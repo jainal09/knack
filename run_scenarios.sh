@@ -247,6 +247,15 @@ compute_budget() {
   export NUM_PROC_GROUPS="$proc_groups"
   export MEMORY_STRESS_LEVELS="$mem_tiers"
 
+  # CLI tool scaling exports (kcat / nats bench)
+  local kafka_queue_kb=$(( kafka_queue_max * computed_payload / 1024 ))
+  [[ $kafka_queue_kb -lt 524288 ]] && kafka_queue_kb=524288
+  export KAFKA_QUEUE_KB="$kafka_queue_kb"
+  # nats bench --maxbytes: scale with broker RAM, min 1GB
+  local nats_maxbytes_gb=$(( large_ram / 2 ))
+  [[ $nats_maxbytes_gb -lt 1 ]] && nats_maxbytes_gb=1
+  export NATS_BENCH_MAXBYTES="${nats_maxbytes_gb}GB"
+
   # ── Print the computed plan ──
   echo ""
   printf "${_CYAN}  ⚡ Auto-configured from budget: %d CPUs / %d GB RAM${_RST}\n" "$budget_cpus" "$budget_ram"
@@ -439,8 +448,9 @@ echo ""
 for s in "${ACTIVE_SCENARIOS[@]}"; do
   read -r name cpus mem <<< "$s"
 
+  name_upper=$(echo "$name" | tr '[:lower:]' '[:upper:]')
   printf "\n${_CYAN}╔══════════════════════════════════════════════════════════╗${_RST}\n"
-  printf "${_CYAN}║  SCENARIO: ${name^^} (${cpus} CPUs, ${mem} RAM)${_RST}\n"
+  printf "${_CYAN}║  SCENARIO: ${name_upper} (${cpus} CPUs, ${mem} RAM)${_RST}\n"
   printf "${_CYAN}╚══════════════════════════════════════════════════════════╝${_RST}\n"
   echo ""
 

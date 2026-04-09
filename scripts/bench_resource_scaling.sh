@@ -61,8 +61,8 @@ _cli_throughput_kafka() {
     yes "$payload" | head -n "$CLI_TOTAL_MESSAGES" | \
       timeout 300 "$KCAT" -P -b localhost:9092 -t bench-scaling-cli \
         -X acks=all \
-        -X queue.buffering.max.messages=100000 \
-        -X queue.buffering.max.kbytes=524288 \
+        -X queue.buffering.max.messages="${KAFKA_QUEUE_MAX:-100000}" \
+        -X queue.buffering.max.kbytes="${KAFKA_QUEUE_KB:-524288}" \
         -X batch.num.messages=10000 \
         -X linger.ms=5
   )
@@ -88,7 +88,7 @@ _cli_throughput_nats() {
     --server="nats://localhost:4222" \
     --create --storage=file --purge \
     --stream="BENCH-SCALING-CLI" \
-    --maxbytes="1GB" \
+    --maxbytes="${NATS_BENCH_MAXBYTES:-1GB}" \
     --clients "$NUM_PRODUCERS" \
     --size "$PAYLOAD_BYTES" \
     --msgs "$CLI_TOTAL_MESSAGES" \

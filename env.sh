@@ -21,8 +21,10 @@ export NATS_PENDING_SIZE="${NATS_PENDING_SIZE:-2097152}"      # 2MB default nats
 export NATS_MAX_MEM="${NATS_MAX_MEM:-256MB}"                  # JetStream max_mem in nats-server.conf
 export NATS_MAX_FILE="${NATS_MAX_FILE:-10GB}"                 # JetStream max_file
 export KAFKA_QUEUE_MAX="${KAFKA_QUEUE_MAX:-100000}"           # librdkafka queue.buffering.max.messages
+export KAFKA_QUEUE_KB="${KAFKA_QUEUE_KB:-524288}"              # kcat queue.buffering.max.kbytes (512MB)
 export KAFKA_FLUSH_TIMEOUT="${KAFKA_FLUSH_TIMEOUT:-30}"       # seconds for producer.flush()
 export NUM_PROC_GROUPS="${NUM_PROC_GROUPS:-1}"                # OS processes for multiprocess producers
+export NATS_BENCH_MAXBYTES="${NATS_BENCH_MAXBYTES:-1GB}"      # nats bench --maxbytes for stream size
 
 export KAFKA_BROKER="localhost:9092"
 export NATS_URL="nats://localhost:4222"

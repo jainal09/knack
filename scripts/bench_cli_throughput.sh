@@ -51,8 +51,8 @@ run_kafka_cli() {
     yes "$payload" | head -n "$TOTAL_MESSAGES" | \
       timeout 300 "$KCAT" -P -b localhost:9092 -t bench-cli \
         -X acks=all \
-        -X queue.buffering.max.messages=100000 \
-        -X queue.buffering.max.kbytes=524288 \
+        -X queue.buffering.max.messages="${KAFKA_QUEUE_MAX:-100000}" \
+        -X queue.buffering.max.kbytes="${KAFKA_QUEUE_KB:-524288}" \
         -X batch.num.messages=10000 \
         -X linger.ms=5
   )
@@ -166,8 +166,8 @@ run_kafka_cli_consumer() {
     yes "$payload" | head -n "$TOTAL_MESSAGES" | \
       timeout 300 "$KCAT" -P -b localhost:9092 -t bench-cli-consumer \
         -X acks=all \
-        -X queue.buffering.max.messages=100000 \
-        -X queue.buffering.max.kbytes=524288 \
+        -X queue.buffering.max.messages="${KAFKA_QUEUE_MAX:-100000}" \
+        -X queue.buffering.max.kbytes="${KAFKA_QUEUE_KB:-524288}" \
         -X batch.num.messages=10000 \
         -X linger.ms=5
   )
@@ -303,8 +303,8 @@ run_kafka_cli_prodcon() {
     yes "$payload" | head -n "$TOTAL_MESSAGES" | \
       timeout 300 "$KCAT" -P -b localhost:9092 -t bench-cli-prodcon \
         -X acks=all \
-        -X queue.buffering.max.messages=100000 \
-        -X queue.buffering.max.kbytes=524288 \
+        -X queue.buffering.max.messages="${KAFKA_QUEUE_MAX:-100000}" \
+        -X queue.buffering.max.kbytes="${KAFKA_QUEUE_KB:-524288}" \
         -X batch.num.messages=10000 \
         -X linger.ms=5
   )
