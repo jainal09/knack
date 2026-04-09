@@ -5,7 +5,14 @@
 set -euo pipefail
 
 KNACK_VERSION="0.1.0"
-KNACK_ROOT="$(cd "$(dirname "$0")" && pwd)"
+# Resolve symlinks to find the real script location
+_self="$0"
+while [[ -L "$_self" ]]; do
+  _dir="$(cd "$(dirname "$_self")" && pwd)"
+  _self="$(readlink "$_self")"
+  [[ "$_self" != /* ]] && _self="$_dir/$_self"
+done
+KNACK_ROOT="$(cd "$(dirname "$_self")" && pwd)"
 
 # ─── Colors ──────────────────────────────────────────────────────────────────
 _RST='\033[0m'; _BOLD='\033[1m'; _DIM='\033[2m'
