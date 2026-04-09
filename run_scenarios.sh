@@ -346,9 +346,23 @@ _handle_sigint() {
     case "$key" in
       [yY])
         printf "\n\033[1;31mAborting benchmark run...\033[0m\n" >/dev/tty
-        _thaw_child
-        if [[ -n "$_CHILD_PID" ]] && kill -0 "$_CHILD_PID" 2>/dev/null; then
-          kill -TERM -- -"$_CHILD_PID" 2>/dev/null || kill -TERM "$_CHILD_PID" 2>/dev/null || true
+        # Kill the entire process tree using the freeze list
+        if [[ -f "$_FREEZE_TMP" ]]; then
+          # Unfreeze so processes can receive signals
+          while IFS= read -r _p; do
+            kill -CONT "$_p" 2>/dev/null || true
+          done < "$_FREEZE_TMP"
+          # SIGTERM everything
+          while IFS= read -r _p; do
+            kill -TERM "$_p" 2>/dev/null || true
+          done < "$_FREEZE_TMP"
+          # Give processes a moment to exit gracefully
+          sleep 2
+          # SIGKILL any stragglers
+          while IFS= read -r _p; do
+            kill -KILL "$_p" 2>/dev/null || true
+          done < "$_FREEZE_TMP"
+          rm -f "$_FREEZE_TMP" 2>/dev/null
         fi
         exit 130
         ;;
