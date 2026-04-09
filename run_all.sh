@@ -109,7 +109,7 @@ mkdir -p "$RESULTS_DIR"
 
 # ─── Centralised logging ────────────────────────────────────────────────────
 LOG_FILE="$RESULTS_DIR/benchmark_$(date +%Y%m%d_%H%M%S).log"
-exec > >(tee -a "$LOG_FILE") 2>&1
+exec > >(trap '' INT; tee -a "$LOG_FILE") 2>&1
 
 log() {
   printf '[%s] %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*"
@@ -184,24 +184,35 @@ echo ""
 # ─── Ctrl+C guard ───────────────────────────────────────────────────────────
 _cancel_confirmed=0
 _handle_sigint() {
-  echo ""
-  printf "${_YELLOW}Ctrl+C detected. Are you sure you want to cancel? [y/N] ${_RST}"
+  printf "\n\033[1;33m⚠  Ctrl+C detected. Abort benchmark? [y = abort / n or Esc = resume] \033[0m" >/dev/tty
   # Temporarily restore default SIGINT so a second Ctrl+C during the prompt kills immediately
   trap - INT
-  local answer=""
-  read -r -t 15 answer </dev/tty 2>/dev/null || answer="n"
-  case "$answer" in
-    [yY]|[yY][eE][sS])
-      printf "${_RED}Aborting benchmark...${_RST}\n"
-      _cancel_confirmed=1
-      kill $METRICS_PID 2>/dev/null || true
-      exit 130
-      ;;
-    *)
-      printf "${_GREEN}Resuming benchmark.${_RST}\n"
-      trap '_handle_sigint' INT
-      ;;
-  esac
+  local key=""
+  while true; do
+    if ! IFS= read -rsn1 -t 15 key </dev/tty 2>/dev/null; then
+      key="n"  # timeout → resume
+    fi
+    case "$key" in
+      [yY])
+        printf "\n\033[1;31mAborting benchmark...\033[0m\n" >/dev/tty
+        _cancel_confirmed=1
+        kill $METRICS_PID 2>/dev/null || true
+        exit 130
+        ;;
+      [nN]|"")
+        # n, N, or Enter → resume
+        printf "\n\033[1;32mResuming benchmark.\033[0m\n" >/dev/tty
+        break
+        ;;
+      $'\x1b')
+        # Esc — flush any trailing escape sequence bytes and resume
+        read -rsn2 -t 0.1 _ </dev/tty 2>/dev/null || true
+        printf "\n\033[1;32mResuming benchmark.\033[0m\n" >/dev/tty
+        break
+        ;;
+    esac
+  done
+  trap '_handle_sigint' INT
 }
 trap '_handle_sigint' INT
 # ─────────────────────────────────────────────────────────────────────────────

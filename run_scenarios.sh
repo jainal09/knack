@@ -101,7 +101,7 @@ fi
 MASTER_RESULTS_DIR="$PROJECT_ROOT/results"
 mkdir -p "$MASTER_RESULTS_DIR"
 MASTER_LOG="$MASTER_RESULTS_DIR/scenarios_$(date +%Y%m%d_%H%M%S).log"
-exec > >(tee -a "$MASTER_LOG") 2>&1
+exec > >(trap '' INT; tee -a "$MASTER_LOG") 2>&1
 
 # ─── Colors ──────────────────────────────────────────────────────────────────
 _RST='\033[0m'
@@ -122,9 +122,9 @@ log "Master log: $MASTER_LOG"
 # ─────────────────────────────────────────────────────────────────────────────
 
 # ─── Ctrl+C guard ───────────────────────────────────────────────────────────
-# The child (run_all.sh) runs via setsid in its own session, so Ctrl+C from
-# the terminal only reaches THIS process — the child keeps running untouched.
-# On abort we send SIGTERM to the child's process group to clean up.
+# tee is protected from SIGINT (trap '' INT in process substitution above).
+# The child runs in a subshell that also ignores INT, so only THIS script
+# handles Ctrl+C. On abort we kill the child explicitly.
 _CHILD_PID=""
 
 _handle_sigint() {
@@ -184,9 +184,9 @@ for s in "${ACTIVE_SCENARIOS[@]}"; do
 
   mkdir -p "$RESULTS_DIR"
 
-  # Run child in its own session (setsid) so Ctrl+C doesn't reach it.
-  # Output still flows through our stdout/stderr (the tee pipe).
-  setsid bash "$PROJECT_ROOT/run_all.sh" "${FORWARD_ARGS[@]}" &
+  # Run child in a subshell that ignores INT so Ctrl+C doesn't kill it.
+  # (portable — works on both Linux and macOS, unlike setsid)
+  ( trap '' INT; exec bash "$PROJECT_ROOT/run_all.sh" "${FORWARD_ARGS[@]}" ) &
   _CHILD_PID=$!
 
   # Wait for the child. Signals interrupt wait, so loop until child exits.
