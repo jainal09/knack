@@ -299,7 +299,40 @@ log "Master log: $MASTER_LOG"
 # handles Ctrl+C. On abort we kill the child explicitly.
 _CHILD_PID=""
 
+# Recursively collect all descendant PIDs of a given PID
+_get_descendants() {
+  local parent="$1"
+  local children
+  children=$(pgrep -P "$parent" 2>/dev/null || true)
+  for child in $children; do
+    echo "$child"
+    _get_descendants "$child"
+  done
+}
+
+_freeze_child() {
+  if [[ -n "$_CHILD_PID" ]] && kill -0 "$_CHILD_PID" 2>/dev/null; then
+    local _all_pids
+    _all_pids=$(_get_descendants "$_CHILD_PID")
+    for _p in $_CHILD_PID $_all_pids; do
+      kill -STOP "$_p" 2>/dev/null || true
+    done
+  fi
+}
+
+_thaw_child() {
+  if [[ -n "$_CHILD_PID" ]] && kill -0 "$_CHILD_PID" 2>/dev/null; then
+    local _all_pids
+    _all_pids=$(_get_descendants "$_CHILD_PID")
+    for _p in $_CHILD_PID $_all_pids; do
+      kill -CONT "$_p" 2>/dev/null || true
+    done
+  fi
+}
+
 _handle_sigint() {
+  _freeze_child
+
   printf "\n\033[1;33m⚠  Ctrl+C detected. Abort benchmark? [y = abort / n or Esc = resume] \033[0m" >/dev/tty
   trap - INT  # second Ctrl+C during prompt kills immediately
   local key=""
@@ -310,24 +343,25 @@ _handle_sigint() {
     case "$key" in
       [yY])
         printf "\n\033[1;31mAborting benchmark run...\033[0m\n" >/dev/tty
+        _thaw_child
         if [[ -n "$_CHILD_PID" ]] && kill -0 "$_CHILD_PID" 2>/dev/null; then
           kill -TERM -- -"$_CHILD_PID" 2>/dev/null || kill -TERM "$_CHILD_PID" 2>/dev/null || true
         fi
         exit 130
         ;;
       [nN]|"")
-        # n, N, or Enter → resume
         printf "\n\033[1;32mResuming benchmark.\033[0m\n" >/dev/tty
         break
         ;;
       $'\x1b')
-        # Esc — flush any trailing escape sequence bytes and resume
         read -rsn2 -t 0.1 _ </dev/tty 2>/dev/null || true
         printf "\n\033[1;32mResuming benchmark.\033[0m\n" >/dev/tty
         break
         ;;
     esac
   done
+
+  _thaw_child
   trap '_handle_sigint' INT
 }
 trap '_handle_sigint' INT
