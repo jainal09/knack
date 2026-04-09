@@ -69,6 +69,9 @@ ${_BOLD}COMMANDS${_RST}
 
   ${_CYAN}self-update${_RST}          Pull the latest version from GitHub
 
+  ${_CYAN}kill${_RST}                 Kill all lingering benchmark processes
+      --dry-run           Show what would be killed without acting
+
   ${_CYAN}version${_RST}              Print version
   ${_CYAN}help${_RST}                 Show this help message
 
@@ -81,6 +84,7 @@ ${_BOLD}EXAMPLES${_RST}
   knack clean --scenario large # Remove only 'large' scenario results
   knack clean --dry-run       # Preview what would be deleted
   knack self-update           # Update Knack to the latest version
+  knack kill                  # Kill orphaned benchmark processes
   knack infra down            # Tear down
 "
 }
@@ -257,6 +261,111 @@ cmd_self_update() {
   fi
 }
 
+cmd_kill() {
+  local dry_run=0
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --dry-run) dry_run=1; shift ;;
+      *) printf "${_YELLOW}Unknown option: %s${_RST}\n" "$1"; exit 1 ;;
+    esac
+  done
+
+  banner
+
+  # Patterns that identify knack-related processes.
+  # Each entry: "grep_pattern|human_label"
+  local patterns=(
+    "run_scenarios.sh|run_scenarios.sh (orchestrator)"
+    "run_all.sh|run_all.sh (benchmark engine)"
+    "bench_idle.sh|bench_idle.sh"
+    "bench_startup.sh|bench_startup.sh"
+    "bench_throughput.sh|bench_throughput.sh"
+    "bench_latency.sh|bench_latency.sh"
+    "bench_memory_stress.sh|bench_memory_stress.sh"
+    "bench_cli_throughput.sh|bench_cli_throughput.sh"
+    "bench_consumer.sh|bench_consumer.sh"
+    "bench_prodcon.sh|bench_prodcon.sh"
+    "bench_resource_scaling.sh|bench_resource_scaling.sh"
+    "metrics_collector.sh|metrics_collector.sh"
+    "producer_kafka.py|producer_kafka.py"
+    "producer_nats.py|producer_nats.py"
+    "consumer_kafka.py|consumer_kafka.py"
+    "consumer_nats.py|consumer_nats.py"
+    "prodcon_kafka.py|prodcon_kafka.py"
+    "prodcon_nats.py|prodcon_nats.py"
+    "latency_kafka.py|latency_kafka.py"
+    "latency_nats.py|latency_nats.py"
+    "aggregate_results.py|aggregate_results.py"
+    "visualize.py|visualize.py"
+  )
+
+  local pids=()
+  local labels=()
+  local my_pid=$$
+
+  for entry in "${patterns[@]}"; do
+    local pattern="${entry%%|*}"
+    local label="${entry##*|}"
+    # Find matching PIDs, excluding grep itself and this script
+    local found
+    found=$(pgrep -f "$pattern" 2>/dev/null | grep -v "^${my_pid}$" || true)
+    for pid in $found; do
+      # Skip if already collected
+      local already=0
+      for p in "${pids[@]:-}"; do
+        [[ "$p" == "$pid" ]] && { already=1; break; }
+      done
+      [[ $already -eq 1 ]] && continue
+      pids+=("$pid")
+      labels+=("$label")
+    done
+  done
+
+  if [[ ${#pids[@]} -eq 0 ]]; then
+    printf "${_GREEN}No lingering benchmark processes found. All clean!${_RST}\n"
+    return 0
+  fi
+
+  printf "${_CYAN}Found %d lingering benchmark process(es):${_RST}\n\n" "${#pids[@]}"
+  for i in "${!pids[@]}"; do
+    local pid="${pids[$i]}"
+    local label="${labels[$i]}"
+    # Get the full command (truncated) for context
+    local cmdline
+    cmdline=$(ps -p "$pid" -o args= 2>/dev/null | head -c 120 || echo "(unknown)")
+    printf "  ${_DIM}PID %-8s${_RST} ${_YELLOW}%-30s${_RST} %s\n" "$pid" "$label" "$cmdline"
+  done
+  echo ""
+
+  if [[ $dry_run -eq 1 ]]; then
+    printf "${_YELLOW}Dry run — nothing was killed.${_RST}\n"
+    return 0
+  fi
+
+  # Kill all found processes — SIGTERM first, then SIGKILL stragglers
+  printf "${_YELLOW}Sending SIGTERM...${_RST}\n"
+  for pid in "${pids[@]}"; do
+    kill -TERM "$pid" 2>/dev/null || true
+  done
+
+  # Wait briefly for graceful shutdown
+  sleep 2
+
+  local survivors=0
+  for pid in "${pids[@]}"; do
+    if kill -0 "$pid" 2>/dev/null; then
+      survivors=$(( survivors + 1 ))
+      kill -KILL "$pid" 2>/dev/null || true
+    fi
+  done
+
+  if [[ $survivors -gt 0 ]]; then
+    printf "${_YELLOW}Sent SIGKILL to %d stubborn process(es).${_RST}\n" "$survivors"
+  fi
+
+  printf "${_GREEN}✔ Killed %d benchmark process(es).${_RST}\n" "${#pids[@]}"
+}
+
 cmd_version() {
   printf "knack %s\n" "$KNACK_VERSION"
 }
@@ -272,6 +381,7 @@ main() {
     report)      cmd_report "$@" ;;
     clean)       cmd_clean "$@" ;;
     infra)       cmd_infra "$@" ;;
+    kill)        cmd_kill "$@" ;;
     self-update) cmd_self_update ;;
     version)     cmd_version ;;
     help|-h|--help) usage ;;

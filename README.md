@@ -113,6 +113,8 @@ knack <command> [options]
 | `knack clean --scenario large` | Remove results for a specific scenario only |
 | `knack clean --dry-run` | Preview what would be deleted without removing |
 | `knack clean -f` | Skip confirmation prompt |
+| `knack kill` | Kill all lingering benchmark processes |
+| `knack kill --dry-run` | Show what would be killed without acting |
 | `knack self-update` | Pull the latest version from GitHub |
 | `knack version` | Print version |
 | `knack help` | Show help |
@@ -263,6 +265,17 @@ knack self-update
 ```
 
 This runs `git pull` in the Knack install directory, shows what changed, and takes effect immediately — no reinstall needed.
+
+### Killing Orphaned Processes
+
+If a benchmark run was interrupted (Ctrl+C, network drop, OOM), child processes may linger:
+
+```bash
+knack kill                      # Find and kill all benchmark processes
+knack kill --dry-run            # Preview what would be killed
+```
+
+This kills any orphaned Python benchmark scripts, bash bench scripts, metrics collectors, and related processes.
 
 ## Advanced Usage
 
