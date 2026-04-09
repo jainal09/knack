@@ -1,5 +1,9 @@
 <p align="center">
-  <img src="assets/knack-logo.png" alt="Knack" width="500">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="assets/knack-logo-dark.png" />
+    <source media="(prefers-color-scheme: light)" srcset="assets/knack-logo.png" />
+    <img src="assets/knack-logo.png" alt="Knack" width="500" />
+  </picture>
 </p>
 
 <h3 align="center">Kafka + NATS Benchmark Suite for Restricted-Hardware Environments</h3>
