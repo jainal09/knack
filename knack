@@ -67,6 +67,8 @@ ${_BOLD}COMMANDS${_RST}
       --dry-run           Show what would be deleted without removing
       --force, -f         Skip confirmation prompt
 
+  ${_CYAN}self-update${_RST}          Pull the latest version from GitHub
+
   ${_CYAN}version${_RST}              Print version
   ${_CYAN}help${_RST}                 Show this help message
 
@@ -78,6 +80,7 @@ ${_BOLD}EXAMPLES${_RST}
   knack clean                 # Remove all previous results
   knack clean --scenario large # Remove only 'large' scenario results
   knack clean --dry-run       # Preview what would be deleted
+  knack self-update           # Update Knack to the latest version
   knack infra down            # Tear down
 "
 }
@@ -226,6 +229,34 @@ cmd_infra() {
   esac
 }
 
+cmd_self_update() {
+  banner
+  printf "${_CYAN}Updating Knack...${_RST}\n\n"
+
+  local before after
+  before=$(git -C "$KNACK_ROOT" rev-parse --short HEAD 2>/dev/null || echo "unknown")
+
+  if ! git -C "$KNACK_ROOT" pull --ff-only 2>&1; then
+    printf "\n${_YELLOW}Fast-forward pull failed. Trying rebase...${_RST}\n"
+    if ! git -C "$KNACK_ROOT" pull --rebase 2>&1; then
+      printf "\n${_YELLOW}Pull failed. You may have local changes. Try:\n  cd %s && git stash && git pull && git stash pop${_RST}\n" "$KNACK_ROOT"
+      exit 1
+    fi
+  fi
+
+  after=$(git -C "$KNACK_ROOT" rev-parse --short HEAD 2>/dev/null || echo "unknown")
+
+  echo ""
+  if [[ "$before" == "$after" ]]; then
+    printf "${_GREEN}✔ Already up to date (%s)${_RST}\n" "$after"
+  else
+    printf "${_GREEN}✔ Updated: %s → %s${_RST}\n" "$before" "$after"
+    echo ""
+    printf "${_DIM}Recent changes:${_RST}\n"
+    git -C "$KNACK_ROOT" log --oneline "${before}..${after}" 2>/dev/null | head -10
+  fi
+}
+
 cmd_version() {
   printf "knack %s\n" "$KNACK_VERSION"
 }
@@ -236,12 +267,13 @@ main() {
   shift || true
 
   case "$cmd" in
-    run)      cmd_run "$@" ;;
-    status)   cmd_status "$@" ;;
-    report)   cmd_report "$@" ;;
-    clean)    cmd_clean "$@" ;;
-    infra)    cmd_infra "$@" ;;
-    version)  cmd_version ;;
+    run)         cmd_run "$@" ;;
+    status)      cmd_status "$@" ;;
+    report)      cmd_report "$@" ;;
+    clean)       cmd_clean "$@" ;;
+    infra)       cmd_infra "$@" ;;
+    self-update) cmd_self_update ;;
+    version)     cmd_version ;;
     help|-h|--help) usage ;;
     *)
       printf "${_YELLOW}Unknown command: %s${_RST}\n\n" "$cmd"

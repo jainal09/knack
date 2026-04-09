@@ -109,6 +109,11 @@ knack <command> [options]
 | `knack infra up` | Start Kafka + NATS broker containers |
 | `knack infra up --ui` | Start with UI tools (Redpanda Console, Nui) |
 | `knack infra down` | Stop and remove containers + volumes |
+| `knack clean` | Remove all previous benchmark results |
+| `knack clean --scenario large` | Remove results for a specific scenario only |
+| `knack clean --dry-run` | Preview what would be deleted without removing |
+| `knack clean -f` | Skip confirmation prompt |
+| `knack self-update` | Pull the latest version from GitHub |
 | `knack version` | Print version |
 | `knack help` | Show help |
 
@@ -235,6 +240,29 @@ infra/
   docker-compose.kafka.yml     # Kafka broker + optional UI
   docker-compose.nats.yml      # NATS broker + optional UI
 ```
+
+## Maintenance
+
+### Cleaning Results
+
+Remove previous benchmark results before starting a fresh run:
+
+```bash
+knack clean                     # Remove all results (with confirmation)
+knack clean --scenario large    # Remove only the 'large' scenario results
+knack clean --dry-run           # Preview what would be deleted
+knack clean -f                  # Skip confirmation prompt
+```
+
+### Updating Knack
+
+Pull the latest version from GitHub:
+
+```bash
+knack self-update
+```
+
+This runs `git pull` in the Knack install directory, shows what changed, and takes effect immediately — no reinstall needed.
 
 ## Advanced Usage
 
