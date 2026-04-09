@@ -298,42 +298,45 @@ log "Master log: $MASTER_LOG"
 # The child runs in a subshell that also ignores INT, so only THIS script
 # handles Ctrl+C. On abort we kill the child explicitly.
 _CHILD_PID=""
+_FREEZE_TMP="/tmp/.knack_freeze_$$"
 
-# Recursively collect all descendant PIDs of a given PID
-_get_descendants() {
-  local parent="$1"
-  local children
-  children=$(pgrep -P "$parent" 2>/dev/null || true)
-  for child in $children; do
-    echo "$child"
-    _get_descendants "$child"
-  done
-}
-
+# Stop/resume the entire child process tree.
+# Avoids $() subshells inside the signal handler (unreliable during trap).
 _freeze_child() {
-  if [[ -n "$_CHILD_PID" ]] && kill -0 "$_CHILD_PID" 2>/dev/null; then
-    local _all_pids
-    _all_pids=$(_get_descendants "$_CHILD_PID")
-    for _p in $_CHILD_PID $_all_pids; do
-      kill -STOP "$_p" 2>/dev/null || true
-    done
-  fi
+  [[ -z "$_CHILD_PID" ]] && return 0
+  kill -0 "$_CHILD_PID" 2>/dev/null || return 0
+  # Dump all PIDs and their parents, find descendants via awk, write to file
+  ps -e -o pid= -o ppid= 2>/dev/null | awk -v root="$_CHILD_PID" '
+    { pid[NR]=$1; ppid[NR]=$2 }
+    END {
+      desc[root]=1
+      do {
+        found=0
+        for (i=1; i<=NR; i++)
+          if (!(pid[i] in desc) && (ppid[i] in desc)) { desc[pid[i]]=1; found=1 }
+      } while (found)
+      for (p in desc) print p
+    }' > "$_FREEZE_TMP" 2>/dev/null
+  # SIGSTOP every PID in the tree
+  while IFS= read -r _p; do
+    kill -STOP "$_p" 2>/dev/null || true
+  done < "$_FREEZE_TMP"
 }
 
 _thaw_child() {
-  if [[ -n "$_CHILD_PID" ]] && kill -0 "$_CHILD_PID" 2>/dev/null; then
-    local _all_pids
-    _all_pids=$(_get_descendants "$_CHILD_PID")
-    for _p in $_CHILD_PID $_all_pids; do
-      kill -CONT "$_p" 2>/dev/null || true
-    done
-  fi
+  [[ -f "$_FREEZE_TMP" ]] || return 0
+  while IFS= read -r _p; do
+    kill -CONT "$_p" 2>/dev/null || true
+  done < "$_FREEZE_TMP"
+  rm -f "$_FREEZE_TMP" 2>/dev/null
 }
 
 _handle_sigint() {
   _freeze_child
 
-  printf "\n\033[1;33m⚠  Ctrl+C detected. Abort benchmark? [y = abort / n or Esc = resume] \033[0m" >/dev/tty
+  # Clear the current line (wipe spinner remnants) then show prompt
+  printf "\r\033[2K" >/dev/tty
+  printf "\033[1;33m⚠  Ctrl+C detected. Abort benchmark? [y = abort / n or Esc = resume] \033[0m" >/dev/tty
   trap - INT  # second Ctrl+C during prompt kills immediately
   local key=""
   while true; do
