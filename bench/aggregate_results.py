@@ -64,7 +64,7 @@ def get_min_viable_ram(broker):
 def build_report():
     report = {
         "metadata": {
-            "benchmark": "kafka-vs-nats-jetstream",
+            "benchmark": "knack",
             "hardware": {
                 "cpus": _kafka_env["BENCH_CPUS"],
                 "memory": _kafka_env["BENCH_MEMORY"],

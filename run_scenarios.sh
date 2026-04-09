@@ -144,7 +144,7 @@ trap '_handle_sigint' INT
 
 # ─── Run each scenario ───────────────────────────────────────────────────────
 printf "${_MAG}============================================================${_RST}\n"
-printf "${_MAG}  Multi-Scenario Benchmark Runner${_RST}\n"
+printf "${_MAG}  ⚡ Knack — Multi-Scenario Benchmark Runner${_RST}\n"
 printf "${_BLUE}  Scenarios: $(printf '%s ' "${ACTIVE_SCENARIOS[@]}" | sed 's/  */ /g')${_RST}\n"
 printf "${_BLUE}  Started: $(date -Iseconds)${_RST}\n"
 printf "${_MAG}============================================================${_RST}\n"

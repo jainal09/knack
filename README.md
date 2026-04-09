@@ -1,105 +1,86 @@
-# NATS vs Kafka Experiment
+<p align="center">
+  <img src="assets/knack-logo.png" alt="Knack" width="500">
+</p>
 
-## Running Infra
+<h3 align="center">Kafka + NATS Benchmark Suite for Restricted-Hardware Environments</h3>
 
-**Start everything (brokers + UIs) in one shot:**
+<p align="center">
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="MIT License"></a>
+  <img src="https://img.shields.io/badge/python-3.11%2B-blue" alt="Python 3.11+">
+  <img src="https://img.shields.io/badge/docker-required-blue" alt="Docker">
+</p>
+
+---
+
+**Knack** (**K**afka + **NA**ts **C**hec**K**) is a production-grade benchmark suite that pits Apache Kafka against NATS JetStream across 9 categories on hardware-constrained environments. It generates detailed JSON reports, 20+ charts, cross-scenario comparisons, and an automated recommendation.
+
+## Quick Install
 
 ```bash
-docker compose -f infra/docker-compose.kafka.yml -f infra/docker-compose.nats.yml --profile tools up -d
+curl -fsSL https://raw.githubusercontent.com/jainal09/knack/main/install.sh | bash
 ```
 
-### Brokers
+Or manually:
 
 ```bash
-docker compose -f infra/docker-compose.kafka.yml up -d   # Kafka    → localhost:9092
-docker compose -f infra/docker-compose.nats.yml up -d     # NATS     → localhost:4222
-```
-
-### UIs (append `--profile tools`)
-
-```bash
-docker compose -f infra/docker-compose.kafka.yml --profile tools up -d   # + Redpanda Console → localhost:9080
-docker compose -f infra/docker-compose.nats.yml --profile tools up -d    # + Nui → localhost:31311, nats-box CLI
-```
-
-### Teardown
-
-```bash
-docker compose -f infra/docker-compose.kafka.yml down -v
-docker compose -f infra/docker-compose.nats.yml down -v
-```
-
-## Setup (one time)
-
-```bash
+git clone https://github.com/jainal09/knack.git
+cd knack
 uv sync
 ```
 
-## Run benchmarks
-
-> **Just use `run_scenarios.sh`.** It runs the full benchmark across multiple hardware profiles
-> (large / medium / small), generates per-scenario charts, and then comparison charts automatically.
-> `run_all.sh` is the lower-level engine that benchmarks one hardware config — you don't need to
-> call it directly unless you're doing a custom single-config run.
-
-### Quick start
+## Quick Start
 
 ```bash
-./run_scenarios.sh                    # full run — all 3 scenarios (~9 hrs)
-./run_scenarios.sh --quick            # smoke test — all 3 scenarios (~45 min)
-./run_scenarios.sh --scenario large   # single scenario only
-./run_scenarios.sh --list             # show scenario configs
+knack infra up            # Start Kafka + NATS containers
+knack run --quick         # Quick smoke test (~45 min)
+knack status --watch      # Monitor progress live
+knack report              # Generate Markdown reports + charts
+knack infra down          # Tear down
 ```
 
-| Scenario | CPUs | Memory |
-|----------|------|--------|
-| large    | 4.0  | 8g     |
-| medium   | 3.0  | 4g     |
-| small    | 2.0  | 2g     |
+## What It Benchmarks
 
-Per-scenario results go to `results/{large,medium,small}/`. Cross-scenario comparison charts
-and a combined mega-image are generated automatically in `results/comparison/`.
+| # | Benchmark | What it measures |
+|---|-----------|------------------|
+| 1 | **Idle Footprint** | RAM + CPU at rest |
+| 2 | **Startup & Recovery** | Cold start and SIGKILL recovery time |
+| 3 | **Throughput** | Max producer throughput (Python client + CLI) |
+| 4 | **Latency** | End-to-end p50/p95/p99/p99.9 at 50% peak rate |
+| 5 | **Memory Stress** | Stability at 4g, 2g, 1g, 512m RAM |
+| 6 | **CLI Throughput** | Native CLI throughput (kcat / nats bench) |
+| 7 | **Consumer** | Consumer-only throughput |
+| 8 | **Producer + Consumer** | Simultaneous producer + consumer load |
+| 9 | **Resource Scaling** | Throughput under varying CPU limits (6 levels) |
 
-### Monitor a running benchmark
+Each benchmark runs across multiple hardware profiles (large / medium / small), so you see how each broker degrades as resources shrink.
 
-```bash
-./bench_status.sh                        # latest run — auto-detects scenario log
-./bench_status.sh --all                  # all past runs
-./bench_status.sh --latest 3             # last 3 runs
-./bench_status.sh --watch                # live watch mode (refresh every 5s, auto-exit on completion)
-./bench_status.sh -w 10                  # watch mode with custom 10s interval
-./bench_status.sh results/large/benchmark_*.log  # specific log file
+## CLI Reference
+
+```
+knack <command> [options]
 ```
 
-Shows per-scenario status (RUNNING / COMPLETED / INTERRUPTED / FAILED), a step-by-step
-progress checklist, elapsed time, remaining steps, and any errors extracted from the logs.
-Watch mode (`-w` / `--watch`) refreshes automatically and exits when all benchmarks complete.
+| Command | Description |
+|---------|-------------|
+| `knack run` | Run the full benchmark suite |
+| `knack run --quick` | Quick smoke test (~45 min across all scenarios) |
+| `knack run --scenario large` | Run a single scenario |
+| `knack run --list` | List available scenarios |
+| `knack status` | Show benchmark status |
+| `knack status --watch` | Live watch mode (auto-refresh, auto-exit) |
+| `knack report` | Generate Markdown reports for all completed scenarios |
+| `knack report --scenario large` | Report for a specific scenario |
+| `knack infra up` | Start Kafka + NATS broker containers |
+| `knack infra up --ui` | Start with UI tools (Redpanda Console, Nui) |
+| `knack infra down` | Stop and remove containers + volumes |
+| `knack version` | Print version |
+| `knack help` | Show help |
 
-> **Ctrl+C guard:** Both `run_all.sh` and `run_scenarios.sh` intercept Ctrl+C and prompt
-> `Are you sure you want to cancel? [y/N]` before aborting. Press N or Enter to resume.
-> A second Ctrl+C during the prompt kills immediately.
-
-### Re-run missing or failed steps
-
-If a scenario ran partially (e.g. medium/small are missing some benchmarks), re-run only
-the missing steps without re-doing the ones that already completed:
-
-```bash
-# Fill in missing steps for medium and small
-./run_scenarios.sh --scenario medium --rerun cli_throughput,consumer,prodcon,latency,resource_scaling
-./run_scenarios.sh --scenario small --rerun cli_throughput,consumer,prodcon,latency,resource_scaling
-
-# Regenerate cross-scenario comparison charts (needed because --scenario only compares 1 at a time)
-SCENARIO_NAMES="large medium small" uv run python3 bench/visualize.py --compare
-```
-
-### All flags
-
-All flags below work with both `run_scenarios.sh` and `run_all.sh`:
+### Run Flags
 
 | Flag | Description | Default |
 |------|-------------|---------|
-| `--quick` | Quick smoke run (30s duration, 1 rep, 2 producers) | — |
+| `--quick` | Quick smoke run (30s duration, 1 rep, 2 producers) | -- |
 | `--duration SEC` | Throughput test duration per run | 600 |
 | `--reps N` | Number of throughput repetitions (median used) | 3 |
 | `--idle-wait SEC` | Idle wait time for footprint measurement | 300 |
@@ -107,84 +88,49 @@ All flags below work with both `run_scenarios.sh` and `run_all.sh`:
 | `--memory SIZE` | Broker memory limit (e.g., `2g`, `512m`) | 4g |
 | `--ui` | Start UI containers alongside brokers | off |
 | `--results-dir DIR` | Output directory for results | `results/` |
-| `--resume` | Resume from last checkpoint (skip completed steps) | — |
-| `--rerun STEPS` | Re-run specific steps (comma-separated), implies `--resume` | — |
+| `--resume` | Resume from last checkpoint (skip completed steps) | -- |
+| `--rerun STEPS` | Re-run specific steps (comma-separated), implies `--resume` | -- |
+| `--scenario NAME` | Run a single scenario (large, medium, small) | all |
 
-`run_scenarios.sh` also accepts `--scenario NAME` and `--list`.
+## Configuration
 
-**Valid step names for `--rerun`:** `idle`, `startup`, `throughput`, `latency`, `memory_stress`, `cli_throughput`, `consumer`, `prodcon`, `resource_scaling`
+All parameters live in `env.sh` and can be overridden with environment variables:
 
-### Benchmark steps (execution order)
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `BENCH_CPUS` | `2.0` | CPU cores per broker container |
+| `BENCH_MEMORY` | `4g` | Starting RAM cap |
+| `BENCH_DISK_TYPE` | `ssd` | Host disk type (metadata) |
+| `PAYLOAD_BYTES` | `1024` | Message payload size (bytes) |
+| `NUM_PRODUCERS` | `4` | Parallel producer threads |
+| `NUM_CONSUMERS` | `4` | Parallel consumer threads |
+| `TEST_DURATION_SEC` | `600` | Throughput test duration (seconds) |
+| `REPS` | `3` | Throughput repetitions |
+| `SCALING_CPU_LEVELS` | `4.0 3.0 2.0 1.5 1.0 0.5` | CPU levels for scaling test |
 
-| # | Step | Script | Description |
-|---|------|--------|-------------|
-| 1 | idle | `bench_idle.sh` | Idle resource footprint (~12 min — 5 min idle × 2 brokers) |
-| 2 | startup | `bench_startup.sh` | Cold start & SIGKILL recovery time (~2 min) |
-| 3 | throughput | `bench_throughput.sh` | Max producer throughput, N reps × 2 brokers (~65 min) |
-| 4 | latency | `bench_latency.sh` | End-to-end latency at 50% peak rate (~12 min) |
-| 5 | memory_stress | `bench_memory_stress.sh` | Stability at 4g → 2g → 1g → 512m RAM (~20 min) |
-| 6 | cli_throughput | `bench_cli_throughput.sh` | CLI-native throughput (kcat / nats bench, ~5 min) |
-| 7 | consumer | `bench_consumer.sh` | Consumer-only throughput, N reps × 2 brokers |
-| 8 | prodcon | `bench_prodcon.sh` | Simultaneous producer + consumer load |
-| 9 | resource_scaling | `bench_resource_scaling.sh` | Throughput under varying CPU limits (6 levels) |
-| 10 | — | `aggregate_results.py` | Merge results into `full_report.json` + decision |
-| 11 | — | `visualize.py` | Generate PNG charts |
+Scenario hardware profiles:
 
-### Advanced: single-config run with `run_all.sh`
+| Scenario | CPUs | Memory |
+|----------|------|--------|
+| large | 4.0 | 8g |
+| medium | 3.0 | 4g |
+| small | 2.0 | 2g |
 
-Use `run_all.sh` directly only if you want to benchmark a single custom hardware config
-without the scenario framework:
+## Report Output
 
-```bash
-BENCH_CPUS=2.0 BENCH_MEMORY=4g ./run_all.sh                # custom config
-./run_all.sh --duration 120                                 # 2 min per throughput run
-./run_all.sh --resume                                       # resume from last checkpoint
-./run_all.sh --rerun latency,consumer                       # re-run specific steps
-```
+After benchmarks complete, `knack report` generates:
 
-Results go to `results/` (flat, no scenario subdirectories). No comparison charts are generated.
+- **Per-scenario reports** at `results/{scenario}/benchmark_report.md` with every chart embedded and data tables
+- **Consolidated report** at `results/benchmark_report.md` combining all scenarios with a table of contents
+- **JSON data** at `results/{scenario}/full_report.json` with raw metrics and automated recommendation
+- **Decision** — one of: `KEEP_KAFKA`, `MIGRATE_TO_NATS`, `TRADEOFF`, or `INCONCLUSIVE`
 
-### Run individual benchmark scripts
+### Charts Generated
 
-```bash
-bash scripts/bench_idle.sh              # Idle footprint
-bash scripts/bench_startup.sh           # Startup & recovery
-bash scripts/bench_throughput.sh        # Max throughput (producer)
-bash scripts/bench_latency.sh           # Latency under load
-bash scripts/bench_memory_stress.sh     # Memory stress
-bash scripts/bench_cli_throughput.sh    # CLI-native throughput (kcat / nats bench)
-bash scripts/bench_consumer.sh          # Consumer-only throughput
-bash scripts/bench_prodcon.sh           # Simultaneous producer + consumer
-bash scripts/bench_resource_scaling.sh  # Throughput vs CPU limit
-```
+#### Per-Scenario (20 charts per scenario)
 
-## Generate Markdown report
-
-```bash
-./bench_report.sh                          # all completed scenarios
-./bench_report.sh --scenario large         # specific scenario
-./bench_report.sh --scenario large medium  # multiple scenarios
-```
-
-Generates `results/{scenario}/benchmark_report.md` for each scenario — a self-contained
-Markdown document with every chart image embedded and the underlying data in tables beneath.
-Timestamped to the run so you know exactly which benchmark produced the data.
-
-When multiple scenarios are processed, also generates a **consolidated report** at
-`results/benchmark_report.md` that combines all scenario reports into a single document
-with a table of contents and correctly rewritten chart paths.
-
-## Generate charts
-
-```bash
-uv run python3 bench/visualize.py              # single-scenario charts
-uv run python3 bench/visualize.py --compare    # cross-scenario comparison charts
-```
-
-### Single-scenario charts (→ `results/charts/`)
-
-| # | File | Description |
-|---|------|-------------|
+| # | Chart | Description |
+|---|-------|-------------|
 | 01 | `01_idle_footprint.png` | Idle RAM + CPU (2-bar subplot) |
 | 02 | `02_startup_recovery.png` | Cold start / SIGKILL recovery time |
 | 03 | `03_throughput.png` | Python client vs CLI producer throughput |
@@ -194,138 +140,140 @@ uv run python3 bench/visualize.py --compare    # cross-scenario comparison chart
 | 06 | `06_scorecard.png` | Full metric comparison table with winner per row |
 | 07 | `07_consumer_throughput.png` | Python vs CLI consumer throughput |
 | 08 | `08_prodcon.png` | Producer + consumer rates under simultaneous load |
-| 09 | `09_resource_timeline.png` | CPU% + memory over time (from `docker_stats.csv`) |
-| 10 | `10_resource_scaling.png` | Throughput + peak memory vs CPU limit (dual Y-axis) |
-| 11 | `11_disk_io_timeline.png` | Disk read/write (block I/O) over time |
+| 09 | `09_resource_timeline.png` | CPU% + memory over time |
+| 10 | `10_resource_scaling.png` | Throughput + peak memory vs CPU limit |
+| 11 | `11_disk_io_timeline.png` | Disk read/write over time |
 | 12 | `12_throughput_vs_resources.png` | Resource efficiency: throughput per CPU core and per GB RAM |
-| 13 | `13_worker_balance.png` | Per-worker throughput distribution (load imbalance detection) |
-| 14 | `14_error_breakdown.png` | Error counts across all test types and memory levels |
-| 15 | `15_throughput_stability.png` | Mean ± stddev across repetitions with CV% |
-| 16 | `16_prodcon_balance.png` | Producer / consumer rate ratio (backpressure indicator) |
-| 17 | `17_network_io_timeline.png` | Network receive/transmit over time from `docker_stats.csv` |
-| 18 | `18_memory_headroom.png` | Memory usage % over time with 80%/95% danger thresholds |
-| 19 | `19_scaling_efficiency.png` | Throughput-per-CPU-core at each limit (diminishing returns) |
+| 13 | `13_worker_balance.png` | Per-worker throughput distribution |
+| 14 | `14_error_breakdown.png` | Error counts across all test types |
+| 15 | `15_throughput_stability.png` | Mean +/- stddev across repetitions with CV% |
+| 16 | `16_prodcon_balance.png` | Producer / consumer rate ratio |
+| 17 | `17_network_io_timeline.png` | Network RX/TX over time |
+| 18 | `18_memory_headroom.png` | Memory usage % with 80%/95% danger thresholds |
+| 19 | `19_scaling_efficiency.png` | Throughput-per-CPU-core at each limit |
 | 20 | `20_latency_context.png` | Latency test context: load%, target rate, samples |
 
-### Cross-scenario comparison charts (→ `results/comparison/`)
+#### Cross-Scenario Comparison (11 charts)
 
-| # | File | Description |
-|---|------|-------------|
+| # | Chart | Description |
+|---|-------|-------------|
 | 01 | `cmp_01_idle.png` | Idle RAM across scenarios |
 | 02 | `cmp_02_startup.png` | Startup / recovery across scenarios |
 | 03 | `cmp_03_throughput.png` | Python client throughput across scenarios |
 | 04 | `cmp_04_cli_throughput.png` | CLI throughput across scenarios |
 | 05 | `cmp_05_latency.png` | Latency percentiles per broker per scenario |
-| 06 | `cmp_06_memory_stress.png` | Pass/fail heatmap table across scenarios |
-| 07 | `cmp_07_consumer.png` | Consumer throughput (Python + CLI) across scenarios |
-| 08 | `cmp_08_prodcon.png` | ProdCon rates (Python + CLI) across scenarios |
-| 09 | `cmp_09_resource_scaling.png` | Throughput-vs-CPU scaling slopes per broker per scenario |
-| 10 | `cmp_10_resource_timeline.png` | CPU / RAM / disk I/O over time, one row per scenario |
-| 11 | `cmp_11_throughput_vs_resources.png` | Resource efficiency (throughput per CPU core & per GB RAM) across scenarios |
-| — | `mega_comparison.png` | All comparison charts + per-scenario scorecards tiled into one image |
+| 06 | `cmp_06_memory_stress.png` | Pass/fail heatmap across scenarios |
+| 07 | `cmp_07_consumer.png` | Consumer throughput across scenarios |
+| 08 | `cmp_08_prodcon.png` | ProdCon rates across scenarios |
+| 09 | `cmp_09_resource_scaling.png` | Throughput-vs-CPU scaling slopes |
+| 10 | `cmp_10_resource_timeline.png` | CPU / RAM / disk I/O over time per scenario |
+| 11 | `cmp_11_throughput_vs_resources.png` | Resource efficiency across scenarios |
+| -- | `mega_comparison.png` | All comparison charts + scorecards tiled into one image |
 
-## Aggregate report + decision
+## Architecture
+
+```
+knack                          # CLI entry point (dispatches to scripts below)
+run_scenarios.sh               # Multi-scenario orchestrator
+run_all.sh                     # Single-scenario benchmark engine
+scripts/
+  bench_idle.sh                # Idle footprint
+  bench_startup.sh             # Startup & recovery
+  bench_throughput.sh          # Max throughput (producer)
+  bench_latency.sh             # Latency under load
+  bench_memory_stress.sh       # Memory stress
+  bench_cli_throughput.sh      # CLI-native throughput
+  bench_consumer.sh            # Consumer-only throughput
+  bench_prodcon.sh             # Simultaneous producer + consumer
+  bench_resource_scaling.sh    # Throughput vs CPU limit
+bench/
+  producer_kafka.py            # Kafka Python producer
+  producer_nats.py             # NATS Python producer
+  consumer_kafka.py            # Kafka Python consumer
+  consumer_nats.py             # NATS Python consumer
+  prodcon_kafka.py             # Kafka simultaneous prod+con
+  prodcon_nats.py              # NATS simultaneous prod+con
+  aggregate_results.py         # Merge results + recommendation
+  visualize.py                 # Chart generation (matplotlib)
+infra/
+  docker-compose.kafka.yml     # Kafka broker + optional UI
+  docker-compose.nats.yml      # NATS broker + optional UI
+```
+
+## Advanced Usage
+
+### Run individual benchmark scripts
+
+```bash
+bash scripts/bench_idle.sh
+bash scripts/bench_throughput.sh
+bash scripts/bench_latency.sh
+```
+
+### Single-config custom run
+
+```bash
+BENCH_CPUS=2.0 BENCH_MEMORY=4g ./run_all.sh
+./run_all.sh --duration 120
+./run_all.sh --resume
+./run_all.sh --rerun latency,consumer
+```
+
+### Re-run missing steps
+
+```bash
+knack run --scenario medium --rerun cli_throughput,consumer,prodcon
+```
+
+### Generate charts directly
+
+```bash
+uv run python3 bench/visualize.py              # single-scenario charts
+uv run python3 bench/visualize.py --compare    # cross-scenario comparison
+```
+
+### Generate aggregate report
 
 ```bash
 uv run python3 bench/aggregate_results.py
 ```
 
-Writes `results/full_report.json` and prints the recommendation (`KEEP_KAFKA`, `MIGRATE_TO_NATS`, `TRADEOFF`, or `INCONCLUSIVE`).
+## Where Results Live
 
-## Where results live
-
-```text
+```
 results/
-├── large/ medium/ small/                 # per-scenario (run_scenarios.sh)
-│   ├── kafka_idle_stats.json
-│   ├── nats_idle_stats.json
-│   ├── kafka_startup.json                # JSONL (one JSON object per line)
-│   ├── nats_startup.json
-│   ├── kafka_throughput_run{1,2,3}.json
-│   ├── nats_throughput_run{1,2,3}.json
-│   ├── kafka_consumer_run{1,2,3}.json
-│   ├── nats_consumer_run{1,2,3}.json
-│   ├── kafka_prodcon.json
-│   ├── nats_prodcon.json
-│   ├── kafka_latency.json
-│   ├── nats_latency.json
-│   ├── kafka_mem_{4g,2g,1g,512m}.json
-│   ├── nats_mem_{4g,2g,1g,512m}.json
-│   ├── kafka_cli_throughput.json
-│   ├── nats_cli_throughput.json
-│   ├── kafka_cli_consumer.json
-│   ├── nats_cli_consumer.json
-│   ├── kafka_cli_prodcon.json
-│   ├── nats_cli_prodcon.json
-│   ├── kafka_scaling.json
-│   ├── nats_scaling.json
-│   ├── docker_stats.csv
-│   ├── full_report.json
-│   ├── checkpoint.log
-│   ├── benchmark_*.log
-│   ├── benchmark_report.md               # per-scenario Markdown report
-│   └── charts/
-│       ├── 01_idle_footprint.png … 20_latency_context.png
-├── benchmark_report.md                   # consolidated report (all scenarios)
-├── comparison/                           # cross-scenario (auto-generated)
-│   ├── cmp_01_idle.png … cmp_11_throughput_vs_resources.png
-│   └── mega_comparison.png
-├── scenarios_*.log                       # run_scenarios.sh master log
-├── *.json                                # single-scenario (run_all.sh directly)
-├── docker_stats.csv
-├── full_report.json
-└── charts/
-    ├── 01_idle_footprint.png … 20_latency_context.png
+  large/ medium/ small/          # per-scenario directories
+    *.json                       # raw benchmark data
+    docker_stats.csv             # container metrics
+    full_report.json             # aggregated report + decision
+    benchmark_report.md          # per-scenario Markdown report
+    charts/                      # per-scenario chart PNGs
+  benchmark_report.md            # consolidated report (all scenarios)
+  comparison/                    # cross-scenario charts
+    cmp_*.png
+    mega_comparison.png
 ```
 
-## Tweak parameters
+## Dependencies & Acknowledgements
 
-Edit `kafka-client.env` / `nats-client.env` at project root, or `env.sh` for shell-level defaults.
-Shell env vars override file values.
+Knack relies on several excellent open-source tools:
 
-### All parameters (`env.sh`)
+- **[Apache Kafka](https://kafka.apache.org/)** — distributed event streaming platform
+- **[NATS JetStream](https://nats.io/)** — cloud-native messaging system with persistence
+- **[kcat](https://github.com/edenhill/kcat)** (formerly kafkacat) — CLI producer/consumer for Kafka, used for CLI throughput benchmarks
+- **[nats CLI](https://github.com/nats-io/natscli)** — official NATS command-line tool, used for CLI benchmarks (`nats bench`)
+- **[Redpanda Console](https://github.com/redpanda-data/console)** — Kafka UI for monitoring (optional)
+- **[Nui](https://github.com/nats-nui/nui)** — NATS UI for monitoring (optional)
+- **[aiokafka](https://github.com/aio-libs/aiokafka)** — async Python Kafka client
+- **[nats.py](https://github.com/nats-io/nats.py)** — official async Python NATS client
+- **[matplotlib](https://matplotlib.org/)** — chart and visualization generation
+- **[uv](https://github.com/astral-sh/uv)** — fast Python package manager
+- **[Docker](https://www.docker.com/)** — container runtime for broker infrastructure
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `BENCH_CPUS` | `2.0` | CPU cores allocated to each broker container |
-| `BENCH_MEMORY` | `4g` | Starting RAM cap (override per scenario or `--memory`) |
-| `BENCH_DISK_TYPE` | `ssd` | Documents actual host disk type (metadata only) |
-| `BENCH_DISK_SIZE` | `20g` | Disk size allocation |
-| `PAYLOAD_BYTES` | `1024` | Message payload size in bytes (1 KB) |
-| `NUM_PRODUCERS` | `4` | Parallel producer threads/tasks |
-| `NUM_CONSUMERS` | `4` | Parallel consumer threads/tasks |
-| `TEST_DURATION_SEC` | `600` | Sustained throughput test duration (10 min) |
-| `REPS` | `3` | Number of throughput repetitions (median used) |
-| `SCALING_CPU_LEVELS` | `4.0 3.0 2.0 1.5 1.0 0.5` | CPU levels for resource scaling test |
-| `KAFKA_BROKER` | `localhost:9092` | Kafka bootstrap server |
-| `NATS_URL` | `nats://localhost:4222` | NATS server URL |
-| `KAFKA_TOPIC` | `bench` | Kafka topic name |
-| `NATS_STREAM` | `BENCH` | NATS JetStream stream name |
-| `NATS_SUBJECT` | `bench.data` | NATS subject pattern |
+## Contributing
 
-Quick short run for testing:
+See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
 
-```bash
-TEST_DURATION_SEC=30 NUM_PRODUCERS=1 uv run python3 bench/producer_kafka.py
-```
+## License
 
-## Cleanup
-
-Stop and remove broker containers + volumes:
-
-```bash
-docker compose -f infra/docker-compose.kafka.yml down -v
-docker compose -f infra/docker-compose.nats.yml down -v
-```
-
-Stop everything (brokers + UIs) at once:
-
-```bash
-docker compose -f infra/docker-compose.kafka.yml -f infra/docker-compose.nats.yml --profile tools down -v
-```
-
-Remove all benchmark results:
-
-```bash
-rm -rf results/*/charts results/comparison results/charts results/*/*.json results/*/*.csv results/*/*.log
-```
+[MIT](LICENSE)

@@ -1,0 +1,148 @@
+#!/usr/bin/env bash
+# ─────────────────────────────────────────────────────────────────────────────
+# knack — Kafka + NATS Benchmark Suite CLI
+# ─────────────────────────────────────────────────────────────────────────────
+set -euo pipefail
+
+KNACK_VERSION="0.1.0"
+KNACK_ROOT="$(cd "$(dirname "$0")" && pwd)"
+
+# ─── Colors ──────────────────────────────────────────────────────────────────
+_RST='\033[0m'; _BOLD='\033[1m'; _DIM='\033[2m'
+_CYAN='\033[36m'; _MAG='\033[35m'; _YELLOW='\033[33m'; _GREEN='\033[32m'
+
+# ─── Banner ──────────────────────────────────────────────────────────────────
+banner() {
+  printf "${_MAG}"
+  cat <<'EOF'
+  _  __                 _
+ | |/ /_ __   __ _  ___| | __
+ | ' /| '_ \ / _` |/ __| |/ /
+ | . \| | | | (_| | (__|   <
+ |_|\_\_| |_|\__,_|\___|_|\_\
+EOF
+  printf "${_RST}"
+  printf "${_DIM}  Kafka + NATS Benchmark Suite v%s${_RST}\n\n" "$KNACK_VERSION"
+}
+
+# ─── Usage ───────────────────────────────────────────────────────────────────
+usage() {
+  banner
+  printf "${_BOLD}USAGE${_RST}
+  knack <command> [options]
+
+${_BOLD}COMMANDS${_RST}
+  ${_CYAN}run${_RST}                  Run the full benchmark suite
+      --quick             Quick smoke test (~45 min)
+      --scenario NAME     Run a single scenario (large|medium|small)
+      --list              List available scenarios
+      --duration SEC      Throughput test duration per run
+      --reps N            Number of throughput repetitions
+      --producers N       Number of parallel producers
+      --resume            Resume from last checkpoint
+      --rerun STEPS       Re-run specific steps (comma-separated)
+
+  ${_CYAN}status${_RST}               Show benchmark status
+      --watch, -w [SEC]   Live watch mode (default: 5s refresh)
+      --all               All past runs
+      --latest N          Last N runs
+
+  ${_CYAN}report${_RST}               Generate Markdown benchmark report
+      --scenario NAME(s)  Specific scenario(s)
+
+  ${_CYAN}infra${_RST}                Manage broker infrastructure
+      up                  Start Kafka + NATS containers
+      down                Stop and remove containers + volumes
+      up --ui             Start with UI tools (Redpanda Console, Nui)
+
+  ${_CYAN}version${_RST}              Print version
+  ${_CYAN}help${_RST}                 Show this help message
+
+${_BOLD}EXAMPLES${_RST}
+  knack infra up              # Start brokers
+  knack run --quick           # Quick smoke test
+  knack status --watch        # Monitor progress
+  knack report                # Generate reports
+  knack infra down            # Tear down
+"
+}
+
+# ─── Commands ────────────────────────────────────────────────────────────────
+
+cmd_run() {
+  banner
+  exec "$KNACK_ROOT/run_scenarios.sh" "$@"
+}
+
+cmd_status() {
+  exec "$KNACK_ROOT/bench_status.sh" "$@"
+}
+
+cmd_report() {
+  exec "$KNACK_ROOT/bench_report.sh" "$@"
+}
+
+cmd_infra() {
+  local action="${1:-}"
+  shift || true
+
+  local compose_kafka="$KNACK_ROOT/infra/docker-compose.kafka.yml"
+  local compose_nats="$KNACK_ROOT/infra/docker-compose.nats.yml"
+
+  case "$action" in
+    up)
+      local profile_args=()
+      for arg in "$@"; do
+        if [[ "$arg" == "--ui" ]]; then
+          profile_args+=(--profile tools)
+        fi
+      done
+      banner
+      printf "${_GREEN}Starting Kafka + NATS infrastructure...${_RST}\n"
+      docker compose -f "$compose_kafka" -f "$compose_nats" "${profile_args[@]}" up -d
+      printf "\n${_GREEN}Infrastructure is up.${_RST}\n"
+      printf "  Kafka  → localhost:9092\n"
+      printf "  NATS   → localhost:4222\n"
+      if [[ " ${profile_args[*]:-} " == *" tools "* ]]; then
+        printf "  Redpanda Console → localhost:9080\n"
+        printf "  Nui              → localhost:31311\n"
+      fi
+      ;;
+    down)
+      banner
+      printf "${_YELLOW}Stopping and removing infrastructure...${_RST}\n"
+      docker compose -f "$compose_kafka" -f "$compose_nats" --profile tools down -v
+      printf "${_GREEN}Infrastructure removed.${_RST}\n"
+      ;;
+    *)
+      printf "${_YELLOW}Usage: knack infra {up|down} [--ui]${_RST}\n"
+      exit 1
+      ;;
+  esac
+}
+
+cmd_version() {
+  printf "knack %s\n" "$KNACK_VERSION"
+}
+
+# ─── Main dispatch ───────────────────────────────────────────────────────────
+main() {
+  local cmd="${1:-help}"
+  shift || true
+
+  case "$cmd" in
+    run)      cmd_run "$@" ;;
+    status)   cmd_status "$@" ;;
+    report)   cmd_report "$@" ;;
+    infra)    cmd_infra "$@" ;;
+    version)  cmd_version ;;
+    help|-h|--help) usage ;;
+    *)
+      printf "${_YELLOW}Unknown command: %s${_RST}\n\n" "$cmd"
+      usage
+      exit 1
+      ;;
+  esac
+}
+
+main "$@"

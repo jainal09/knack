@@ -173,7 +173,7 @@ progress() {
 # ─────────────────────────────────────────────────────────────────────────────
 
 printf "${_MAG}============================================${_RST}\n"
-printf "${_MAG}  Kafka vs NATS JetStream Benchmark Suite${_RST}\n"
+printf "${_MAG}  ⚡ Knack — Kafka + NATS Benchmark Suite${_RST}\n"
 printf "${_MAG}  Started: $(date -Iseconds)${_RST}\n"
 printf "${_BLUE}  CPUs: ${BENCH_CPUS} | RAM: ${BENCH_MEMORY} | UI: ${COMPOSE_PROFILES:-off}${_RST}\n"
 printf "${_BLUE}  Duration: ${TEST_DURATION_SEC}s | Reps: ${REPS} | Producers: ${NUM_PRODUCERS} | Consumers: ${NUM_CONSUMERS} | Throughput: UNCAPPED${_RST}\n"

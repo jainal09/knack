@@ -1,7 +1,7 @@
 [project]
-name = "kafka-nats-benchmark"
+name = "knack"
 version = "0.1.0"
-description = "Kafka vs NATS JetStream restricted-hardware benchmark suite"
+description = "Knack — Kafka + NATS benchmark suite for restricted-hardware environments"
 requires-python = ">=3.11"
 dependencies = [
     "aiokafka>=0.11.0",

@@ -103,8 +103,13 @@ generate_report() {
   local out="$dir/benchmark_report.md"
   echo "  Generating $out ..."
 
+  # Copy branded logo into scenario results dir so the report is self-contained
+  cp "$PROJECT_ROOT/assets/knack-logo-sm.png" "$dir/knack-logo-sm.png" 2>/dev/null || true
+
   cat > "$out" <<HEADER
-# Benchmark Report: ${scenario^^}
+![Knack](./knack-logo-sm.png)
+
+# Knack Benchmark Report: ${scenario^^}
 
 | Field | Value |
 |-------|-------|
@@ -778,6 +783,9 @@ if [[ ${#SCENARIOS[@]} -gt 1 ]]; then
   COMBINED="$PROJECT_ROOT/results/benchmark_report.md"
   echo "  Generating consolidated $COMBINED ..."
 
+  # Copy branded logo into results dir for the consolidated report
+  cp "$PROJECT_ROOT/assets/knack-logo-sm.png" "$PROJECT_ROOT/results/knack-logo-sm.png" 2>/dev/null || true
+
   # Sort scenarios for deterministic order: small, medium, large, then anything else alpha
   IFS=$'\n' SORTED=($(for s in "${SCENARIOS[@]}"; do
     case "$s" in
@@ -790,7 +798,9 @@ if [[ ${#SCENARIOS[@]} -gt 1 ]]; then
   unset IFS
 
   cat > "$COMBINED" <<'HEADER'
-# Kafka vs NATS — Consolidated Benchmark Report
+![Knack](./knack-logo-sm.png)
+
+# Knack — Consolidated Benchmark Report
 
 This report combines results from all scenario sizes into a single document.
 

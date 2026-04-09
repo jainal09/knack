@@ -757,7 +757,7 @@ def chart_scorecard():
     fig_height = max(5, 0.45 * len(rows) + 1.5)
     fig, ax = plt.subplots(figsize=(14, fig_height))
     fig.suptitle(
-        "Benchmark Scorecard — Kafka vs NATS JetStream",
+        "Knack Scorecard — Kafka vs NATS JetStream",
         fontweight="bold",
         fontsize=16,
         y=0.98,
