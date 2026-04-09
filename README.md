@@ -18,6 +18,38 @@
 
 **Knack** (**K**afka + **NA**ts **C**hec**K**) is a production-grade benchmark suite that pits Apache Kafka against NATS JetStream across 9 categories on hardware-constrained environments. It generates detailed JSON reports, 20+ charts, cross-scenario comparisons, and an automated recommendation.
 
+<p align="center">
+  <a href="sample-report/benchmark_report.md"><strong>View Full Sample Report</strong></a>
+</p>
+
+## Sample Output
+
+<p align="center">
+  <img src="sample-report/large/charts/06_scorecard.png" alt="Benchmark Scorecard" width="800">
+</p>
+
+<details>
+<summary><strong>More charts (click to expand)</strong></summary>
+<br>
+
+| Throughput | Latency |
+|:---:|:---:|
+| ![Throughput](sample-report/large/charts/03_throughput.png) | ![Latency](sample-report/large/charts/04_latency.png) |
+
+| Idle Footprint | Memory Stress |
+|:---:|:---:|
+| ![Idle](sample-report/large/charts/01_idle_footprint.png) | ![Memory Stress](sample-report/large/charts/05_memory_stress.png) |
+
+| Resource Scaling | Scaling Efficiency |
+|:---:|:---:|
+| ![Resource Scaling](sample-report/large/charts/10_resource_scaling.png) | ![Scaling Efficiency](sample-report/large/charts/19_scaling_efficiency.png) |
+
+| Cross-Scenario Comparison |
+|:---:|
+| ![Mega Comparison](sample-report/comparison/mega_comparison.png) |
+
+</details>
+
 ## Quick Install
 
 ```bash
