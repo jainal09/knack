@@ -44,6 +44,58 @@ if [[ "$fail" -ne 0 ]]; then
 fi
 printf "\n"
 
+# ─── Install optional benchmark tools ─────────────────────────────────────
+printf "${_BOLD}Installing benchmark CLI tools...${_RST}\n"
+
+# kcat / kafkacat
+if command -v kcat &>/dev/null || command -v kafkacat &>/dev/null; then
+  printf "  ${_GREEN}✓${_RST} kcat (already installed)\n"
+else
+  if [[ "$(uname)" == "Darwin" ]]; then
+    if command -v brew &>/dev/null; then
+      printf "  ${_CYAN}Installing kcat via Homebrew...${_RST}\n"
+      brew install kcat 2>/dev/null && printf "  ${_GREEN}✓${_RST} kcat\n" \
+        || printf "  ${_YELLOW}⚠${_RST} kcat install failed — CLI throughput benchmarks will be skipped\n"
+    else
+      printf "  ${_YELLOW}⚠${_RST} kcat — Homebrew not found, install manually: brew install kcat\n"
+    fi
+  else
+    printf "  ${_CYAN}Installing kafkacat via apt...${_RST}\n"
+    sudo apt-get install -y kafkacat 2>/dev/null && printf "  ${_GREEN}✓${_RST} kafkacat\n" \
+      || printf "  ${_YELLOW}⚠${_RST} kafkacat install failed — CLI throughput benchmarks will be skipped\n"
+  fi
+fi
+
+# nats CLI
+if command -v nats &>/dev/null; then
+  printf "  ${_GREEN}✓${_RST} nats CLI (already installed)\n"
+else
+  if [[ "$(uname)" == "Darwin" ]]; then
+    if command -v brew &>/dev/null; then
+      printf "  ${_CYAN}Installing nats CLI via Homebrew...${_RST}\n"
+      brew install nats-io/nats-tools/nats 2>/dev/null && printf "  ${_GREEN}✓${_RST} nats CLI\n" \
+        || printf "  ${_YELLOW}⚠${_RST} nats CLI install failed — NATS CLI benchmarks will be skipped\n"
+    else
+      printf "  ${_YELLOW}⚠${_RST} nats CLI — Homebrew not found, install manually: brew install nats-io/nats-tools/nats\n"
+    fi
+  else
+    printf "  ${_CYAN}Installing nats CLI...${_RST}\n"
+    if curl -sf https://binaries.nats.dev/nats-io/natscli/nats@latest 2>/dev/null | sh 2>/dev/null; then
+      # The nats install script drops the binary in the current directory
+      if [[ -f "./nats" ]]; then
+        mkdir -p "$HOME/.local/bin"
+        mv ./nats "$HOME/.local/bin/nats"
+        chmod +x "$HOME/.local/bin/nats"
+      fi
+      printf "  ${_GREEN}✓${_RST} nats CLI\n"
+    else
+      printf "  ${_YELLOW}⚠${_RST} nats CLI install failed — NATS CLI benchmarks will be skipped\n"
+    fi
+  fi
+fi
+
+printf "\n"
+
 # ─── Clone or detect existing repo ──────────────────────────────────────────
 if [[ -f "./knack" && -f "./pyproject.toml" ]]; then
   printf "${_CYAN}Detected existing Knack repo in current directory.${_RST}\n"
