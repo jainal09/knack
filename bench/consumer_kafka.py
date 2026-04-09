@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
 """Kafka consumer — max throughput benchmark.
 
-Pre-populates PREPOPULATE_COUNT messages into a dedicated topic, then runs
-NUM_CONSUMERS concurrent aiokafka consumers measuring pure consume speed.
+Pre-populates PREPOPULATE_COUNT messages into a dedicated topic using
+multiprocess producers, then runs NUM_CONSUMERS concurrent consumers
+across OS processes measuring pure consume speed.
 """
 
 import asyncio
 import json
+import multiprocessing
 import os
 import sys
 import time
@@ -28,11 +30,13 @@ def _cfg(key):
 BROKER = _cfg("KAFKA_BROKER")
 TOPIC = _cfg("KAFKA_CONSUMER_TOPIC")
 DURATION = int(_cfg("TEST_DURATION_SEC"))
-PAYLOAD = b"x" * int(_cfg("PAYLOAD_BYTES"))
+PAYLOAD_BYTES = int(_cfg("PAYLOAD_BYTES"))
+PAYLOAD = b"x" * PAYLOAD_BYTES
 NUM_CONSUMERS = int(_cfg("NUM_CONSUMERS"))
 PREPOPULATE_COUNT = int(os.environ.get("PREPOPULATE_COUNT", "500000"))
-
-_consumed_counts: dict[int, int] = {}  # per-worker live counters for progress
+KAFKA_QUEUE_MAX = int(os.environ.get("KAFKA_QUEUE_MAX", "100000"))
+KAFKA_FLUSH_TIMEOUT = int(os.environ.get("KAFKA_FLUSH_TIMEOUT", "30"))
+NUM_PROC_GROUPS = int(os.environ.get("NUM_PROC_GROUPS", "1"))
 
 
 def ensure_topic():
@@ -51,22 +55,18 @@ def ensure_topic():
                 print(f"Warning creating topic: {e}", file=sys.stderr)
 
 
-def prepopulate():
-    """Fill the topic with PREPOPULATE_COUNT messages using confluent-kafka Producer."""
-    print(
-        f"Pre-populating {PREPOPULATE_COUNT:,} messages into {TOPIC}...",
-        file=sys.stderr,
-    )
+def _prepop_worker(count, count_dict, proc_id):
+    """Pre-populate a portion of messages in a separate OS process."""
     p = CProducer(
         {
             "bootstrap.servers": BROKER,
             "acks": "all",
             "linger.ms": 5,
             "batch.num.messages": 1000,
-            "queue.buffering.max.messages": 100000,
+            "queue.buffering.max.messages": KAFKA_QUEUE_MAX,
         }
     )
-
+    payload = b"x" * PAYLOAD_BYTES
     sent = 0
     errors = 0
 
@@ -75,112 +75,122 @@ def prepopulate():
         if err is not None:
             errors += 1
 
+    for i in range(count):
+        try:
+            p.produce(TOPIC, payload, callback=_on_delivery)
+            sent += 1
+        except BufferError:
+            p.poll(0.1)
+            try:
+                p.produce(TOPIC, payload, callback=_on_delivery)
+                sent += 1
+            except Exception:
+                errors += 1
+        if sent % 5000 == 0:
+            p.poll(0)
+            count_dict[proc_id] = sent
+
+    p.flush(timeout=KAFKA_FLUSH_TIMEOUT)
+    count_dict[proc_id] = sent
+
+
+def prepopulate():
+    """Fill the topic with PREPOPULATE_COUNT messages using multiple processes."""
+    print(
+        f"Pre-populating {PREPOPULATE_COUNT:,} messages into {TOPIC}...",
+        file=sys.stderr,
+    )
+    num_groups = min(NUM_PROC_GROUPS, 4)
+    per_group = PREPOPULATE_COUNT // num_groups
+    remainder = PREPOPULATE_COUNT % num_groups
+
+    manager = multiprocessing.Manager()
+    count_dict = manager.dict()
+
+    processes = []
+    for i in range(num_groups):
+        count = per_group + (1 if i < remainder else 0)
+        p = multiprocessing.Process(
+            target=_prepop_worker, args=(count, count_dict, i)
+        )
+        p.start()
+        processes.append(p)
+
     with tqdm(
         total=PREPOPULATE_COUNT, unit="msg", desc="Pre-populating", file=sys.stderr
     ) as pbar:
-        for i in range(PREPOPULATE_COUNT):
-            try:
-                p.produce(TOPIC, PAYLOAD, callback=_on_delivery)
-                sent += 1
-            except BufferError:
-                p.poll(0.1)
-                try:
-                    p.produce(TOPIC, PAYLOAD, callback=_on_delivery)
-                    sent += 1
-                except Exception:
-                    errors += 1
-            if sent % 5000 == 0:
-                p.poll(0)
-                pbar.update(5000)
+        last = 0
+        while any(p.is_alive() for p in processes):
+            time.sleep(0.5)
+            current = sum(count_dict.values())
+            pbar.update(current - last)
+            last = current
 
-        # Final flush
-        p.flush(timeout=60)
-        pbar.update(sent - pbar.n)
+        current = sum(count_dict.values())
+        pbar.update(current - last)
 
-    print(
-        f"Pre-populated {sent:,} messages ({errors} errors)", file=sys.stderr
-    )
-    return sent
+    for p in processes:
+        p.join(timeout=KAFKA_FLUSH_TIMEOUT + 10)
+
+    total = sum(count_dict.values())
+    print(f"Pre-populated {total:,} messages", file=sys.stderr)
+    return total
 
 
-async def consumer_worker(worker_id, partition, total_target):
-    """Single aiokafka consumer: reads from one partition as fast as possible."""
-    from aiokafka import AIOKafkaConsumer, TopicPartition
+def _consumer_process(worker_id, partition, total_target, result_queue, count_dict):
+    """Consumer process: reads from one partition as fast as possible."""
 
-    tp = TopicPartition(TOPIC, partition)
-    consumer = AIOKafkaConsumer(
-        bootstrap_servers=BROKER,
-        auto_offset_reset="earliest",
-        enable_auto_commit=True,
-        auto_commit_interval_ms=1000,
-        max_poll_records=500,
-        fetch_max_bytes=10 * 1024 * 1024,  # 10 MB
-    )
-    await consumer.start()
-    consumer.assign([tp])
-    await consumer.seek_to_beginning(tp)
+    async def _run():
+        from aiokafka import AIOKafkaConsumer, TopicPartition
 
-    consumed = 0
-    t0 = None
-    deadline = time.monotonic() + DURATION
-    empty_polls = 0
+        tp = TopicPartition(TOPIC, partition)
+        consumer = AIOKafkaConsumer(
+            bootstrap_servers=BROKER,
+            auto_offset_reset="earliest",
+            enable_auto_commit=True,
+            auto_commit_interval_ms=1000,
+            max_poll_records=500,
+            fetch_max_bytes=10 * 1024 * 1024,  # 10 MB
+        )
+        await consumer.start()
+        consumer.assign([tp])
+        await consumer.seek_to_beginning(tp)
 
-    try:
-        while time.monotonic() < deadline and consumed < total_target:
-            # Use getmany with timeout so we never block forever
-            result = await consumer.getmany(tp, timeout_ms=2000)
-            msgs = result.get(tp, [])
-            if not msgs:
-                empty_polls += 1
-                if empty_polls >= 3:
-                    break  # No more messages left
-                continue
-            empty_polls = 0
-            if t0 is None:
-                t0 = time.monotonic()
-            consumed += len(msgs)
-            _consumed_counts[worker_id] = consumed
-    finally:
-        await consumer.stop()
+        consumed = 0
+        t0 = None
+        deadline = time.monotonic() + DURATION
+        empty_polls = 0
 
-    if t0 is None:
-        t0 = time.monotonic()
-    wall = time.monotonic() - t0
+        try:
+            while time.monotonic() < deadline and consumed < total_target:
+                result = await consumer.getmany(tp, timeout_ms=2000)
+                msgs = result.get(tp, [])
+                if not msgs:
+                    empty_polls += 1
+                    if empty_polls >= 3:
+                        break
+                    continue
+                empty_polls = 0
+                if t0 is None:
+                    t0 = time.monotonic()
+                consumed += len(msgs)
+                count_dict[worker_id] = consumed
+        finally:
+            await consumer.stop()
 
-    return {
-        "worker": worker_id,
-        "partition": partition,
-        "consumed": consumed,
-        "wall_sec": round(wall, 2),
-        "avg_rate": round(consumed / wall, 1) if wall > 0 else 0,
-    }
+        if t0 is None:
+            t0 = time.monotonic()
+        wall = time.monotonic() - t0
 
+        result_queue.put({
+            "worker": worker_id,
+            "partition": partition,
+            "consumed": consumed,
+            "wall_sec": round(wall, 2),
+            "avg_rate": round(consumed / wall, 1) if wall > 0 else 0,
+        })
 
-async def run_consumers(prepopulated):
-    """Launch NUM_CONSUMERS async tasks and monitor progress."""
-    per_consumer_target = prepopulated // NUM_CONSUMERS + 1
-
-    tasks = [
-        asyncio.create_task(consumer_worker(i, i, per_consumer_target))
-        for i in range(NUM_CONSUMERS)
-    ]
-
-    # Progress monitor
-    async def _progress_monitor():
-        with tqdm(
-            total=DURATION, unit="s", desc="Kafka consume", file=sys.stderr
-        ) as pbar:
-            for _ in range(DURATION):
-                await asyncio.sleep(1)
-                pbar.update(1)
-                total = sum(_consumed_counts.values())
-                pbar.set_postfix(msgs=f"{total:,}")
-
-    monitor = asyncio.create_task(_progress_monitor())
-    results = await asyncio.gather(*tasks)
-    monitor.cancel()
-
-    return results
+    asyncio.run(_run())
 
 
 def main():
@@ -191,22 +201,50 @@ def main():
     time.sleep(1)
 
     print("Starting consumer benchmark...", file=sys.stderr)
-    worker_results = asyncio.run(run_consumers(prepopulated))
 
-    total_consumed = sum(r["consumed"] for r in worker_results)
-    total_wall = max(r["wall_sec"] for r in worker_results) if worker_results else 0
+    manager = multiprocessing.Manager()
+    result_queue = manager.Queue()
+    count_dict = manager.dict()
+
+    per_consumer_target = prepopulated // NUM_CONSUMERS + 1
+
+    processes = []
+    for i in range(NUM_CONSUMERS):
+        p = multiprocessing.Process(
+            target=_consumer_process,
+            args=(i, i, per_consumer_target, result_queue, count_dict),
+        )
+        p.start()
+        processes.append(p)
+
+    with tqdm(total=DURATION, unit="s", desc="Kafka consume", file=sys.stderr) as pbar:
+        for _ in range(DURATION):
+            time.sleep(1)
+            pbar.update(1)
+            total = sum(count_dict.values())
+            pbar.set_postfix(msgs=f"{total:,}")
+
+    for p in processes:
+        p.join(timeout=30)
+
+    results = []
+    while not result_queue.empty():
+        results.append(result_queue.get_nowait())
+
+    total_consumed = sum(r["consumed"] for r in results)
+    total_wall = max(r["wall_sec"] for r in results) if results else 0
 
     output = {
         "broker": "kafka",
         "test_type": "consumer",
         "num_consumers": NUM_CONSUMERS,
-        "payload_bytes": int(_cfg("PAYLOAD_BYTES")),
+        "payload_bytes": PAYLOAD_BYTES,
         "duration_sec": DURATION,
         "prepopulated": prepopulated,
         "total_consumed": total_consumed,
         "wall_sec": total_wall,
         "aggregate_rate": round(total_consumed / total_wall, 1) if total_wall > 0 else 0,
-        "per_worker": worker_results,
+        "per_worker": results,
     }
     print(json.dumps(output, indent=2))
 

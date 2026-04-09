@@ -16,6 +16,14 @@ export SCALING_CPU_LEVELS="${SCALING_CPU_LEVELS:-4.0 3.0 2.0 1.5 1.0 0.5}"
 export PREPOPULATE_COUNT="${PREPOPULATE_COUNT:-500000}"
 export CLI_TOTAL_MESSAGES="${CLI_TOTAL_MESSAGES:-500000}"
 
+# Client-side scaling (overridden by compute_budget when --budget is used)
+export NATS_PENDING_SIZE="${NATS_PENDING_SIZE:-2097152}"      # 2MB default nats-py pending buffer
+export NATS_MAX_MEM="${NATS_MAX_MEM:-256MB}"                  # JetStream max_mem in nats-server.conf
+export NATS_MAX_FILE="${NATS_MAX_FILE:-10GB}"                 # JetStream max_file
+export KAFKA_QUEUE_MAX="${KAFKA_QUEUE_MAX:-100000}"           # librdkafka queue.buffering.max.messages
+export KAFKA_FLUSH_TIMEOUT="${KAFKA_FLUSH_TIMEOUT:-30}"       # seconds for producer.flush()
+export NUM_PROC_GROUPS="${NUM_PROC_GROUPS:-1}"                # OS processes for multiprocess producers
+
 export KAFKA_BROKER="localhost:9092"
 export NATS_URL="nats://localhost:4222"
 export KAFKA_TOPIC="bench"

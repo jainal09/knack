@@ -196,6 +196,39 @@ compute_budget() {
   [[ $computed_prepopulate -lt 500000 ]] && computed_prepopulate=500000
   [[ $computed_prepopulate -gt 5000000 ]] && computed_prepopulate=5000000
 
+  # ── Client-side buffer scaling ──
+  # NATS: pending_size = workers × payload × MAX_INFLIGHT, capped at 64MB
+  local nats_pending=$(( computed_producers * computed_payload * 256 ))
+  [[ $nats_pending -lt 2097152 ]] && nats_pending=2097152         # min 2MB
+  [[ $nats_pending -gt 67108864 ]] && nats_pending=67108864       # max 64MB
+
+  # NATS server: max_mem = 50% of large-scenario broker RAM (rest for OS/connections)
+  local nats_max_mem_mb=$(( large_ram * 1024 / 2 ))
+  [[ $nats_max_mem_mb -lt 256 ]] && nats_max_mem_mb=256
+
+  # Kafka: scale queue buffer inversely with payload size to prevent OOM
+  local kafka_queue_max=100000
+  if [[ $computed_payload -ge 16384 ]]; then
+    kafka_queue_max=10000    # 10K × 16KB = 160MB — manageable
+  elif [[ $computed_payload -ge 4096 ]]; then
+    kafka_queue_max=50000    # 50K × 4KB = 200MB
+  fi
+
+  # Process groups: split workers across OS processes for multi-core
+  local proc_groups=$(( usable_cpus / 4 ))
+  [[ $proc_groups -lt 1 ]] && proc_groups=1
+  [[ $proc_groups -gt 8 ]] && proc_groups=8
+
+  # Memory stress tiers: scale with machine RAM
+  local mem_tiers=""
+  if [[ $usable_ram -ge 32 ]]; then
+    mem_tiers="8g 4g 2g 1g 512m"
+  elif [[ $usable_ram -ge 16 ]]; then
+    mem_tiers="4g 2g 1g 512m"
+  else
+    mem_tiers="4g 2g 1g 512m"
+  fi
+
   # ── Export env vars (picked up by run_all.sh → env.sh → Python) ──
   # Only export if not already overridden by explicit CLI flags
   export NUM_PRODUCERS="${NUM_PRODUCERS_OVERRIDE:-$computed_producers}"
@@ -205,6 +238,14 @@ compute_budget() {
   export TEST_DURATION_SEC="${TEST_DURATION_SEC_OVERRIDE:-$computed_duration}"
   export PREPOPULATE_COUNT="${PREPOPULATE_COUNT_OVERRIDE:-$computed_prepopulate}"
   export CLI_TOTAL_MESSAGES="${CLI_TOTAL_MESSAGES_OVERRIDE:-$computed_prepopulate}"
+
+  # Client-side scaling exports
+  export NATS_PENDING_SIZE="$nats_pending"
+  export NATS_MAX_MEM="${nats_max_mem_mb}MB"
+  export KAFKA_QUEUE_MAX="$kafka_queue_max"
+  export KAFKA_FLUSH_TIMEOUT="60"
+  export NUM_PROC_GROUPS="$proc_groups"
+  export MEMORY_STRESS_LEVELS="$mem_tiers"
 
   # ── Print the computed plan ──
   echo ""
@@ -220,7 +261,10 @@ compute_budget() {
   printf "  │  Payload: ${_CYAN}%s B${_RST}  │  Duration: ${_CYAN}%ss${_RST}  │  Reps: ${_CYAN}%s${_RST}            │\n" \
     "$PAYLOAD_BYTES" "$TEST_DURATION_SEC" "${REPS:-3}"
   printf "  │  Scaling: ${_CYAN}%s${_RST}  │\n" "$SCALING_CPU_LEVELS"
-  printf "  │  Prepopulate: ${_CYAN}%s msgs${_RST}                                   │\n" \
+  printf "  │  Processes: ${_CYAN}%s${_RST}  │  NATS buf: ${_CYAN}%s MB${_RST}  │  NATS mem: ${_CYAN}%s${_RST}  │\n" \
+    "$NUM_PROC_GROUPS" "$(( nats_pending / 1048576 ))" "$NATS_MAX_MEM"
+  printf "  │  Kafka Q: ${_CYAN}%s${_RST}  │  Prepop: ${_CYAN}%s msgs${_RST}                     │\n" \
+    "$KAFKA_QUEUE_MAX" \
     "$(printf '%d' "$PREPOPULATE_COUNT" | awk '{len=length($0); for(i=1;i<=len;i++){printf "%s",substr($0,i,1); if((len-i)%3==0 && i!=len) printf ","}}')"
   printf "${_BOLD}  └──────────────────────────────────────────────────────────────┘${_RST}\n"
   echo ""

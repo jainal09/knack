@@ -10,14 +10,52 @@ mkdir -p "$RESULTS_DIR"
 # Shorter duration for memory stress (2 min to save time)
 export TEST_DURATION_SEC=120
 
-MEMORY_LEVELS=("4g" "2g" "1g" "512m")
+# Memory tiers: use budget-computed levels if available, else fallback
+if [[ -n "${MEMORY_STRESS_LEVELS:-}" ]]; then
+  read -ra MEMORY_LEVELS <<< "$MEMORY_STRESS_LEVELS"
+else
+  MEMORY_LEVELS=("4g" "2g" "1g" "512m")
+fi
+
+# Helper: parse memory string to MB for scaling calculations
+_mem_to_mb() {
+  local mem="$1"
+  if [[ "$mem" == *g ]]; then
+    echo $(( ${mem%g} * 1024 ))
+  elif [[ "$mem" == *m ]]; then
+    echo "${mem%m}"
+  else
+    echo "0"
+  fi
+}
 
 for MEM in "${MEMORY_LEVELS[@]}"; do
   export BENCH_MEMORY="$MEM"
 
+  # Scale client-side params for this memory tier
+  local_mb=$(_mem_to_mb "$MEM")
+
+  # NATS server max_mem: 50% of broker RAM, min 64MB
+  local nats_mem_mb=$(( local_mb / 2 ))
+  [[ $nats_mem_mb -lt 64 ]] && nats_mem_mb=64
+  export NATS_MAX_MEM="${nats_mem_mb}MB"
+
+  # Reduce producers for low-memory tiers to avoid overwhelming
+  local stress_producers="${NUM_PRODUCERS:-4}"
+  if [[ $local_mb -le 512 ]]; then
+    stress_producers=2
+    export KAFKA_QUEUE_MAX=10000
+  elif [[ $local_mb -le 1024 ]]; then
+    stress_producers=4
+    export KAFKA_QUEUE_MAX=25000
+  fi
+  export NUM_PRODUCERS="$stress_producers"
+  export NUM_CONSUMERS="$stress_producers"
+
   for BROKER_NAME in kafka nats; do
     log "========================================"
     log "  Memory stress: $BROKER_NAME @ $MEM"
+    log "  Workers: $stress_producers | NATS max_mem: $NATS_MAX_MEM"
     log "========================================"
 
     COMPOSE="$PROJECT_ROOT/infra/docker-compose.${BROKER_NAME}.yml"

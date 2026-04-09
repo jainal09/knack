@@ -33,12 +33,13 @@ PEAK_RATE = int(_cfg("PEAK_RATE"))
 TARGET_RATE = PEAK_RATE // 2
 DURATION = int(_cfg("LATENCY_DURATION_SEC"))
 PAYLOAD_SZ = int(_cfg("PAYLOAD_BYTES"))
+NATS_PENDING_SIZE = int(os.environ.get("NATS_PENDING_SIZE", str(2 * 1024 * 1024)))
 
 latencies = []
 
 
 async def main():
-    nc = await nats.connect(NATS_URL)
+    nc = await nats.connect(NATS_URL, pending_size=NATS_PENDING_SIZE)
     js = nc.jetstream()
 
     # Ensure stream

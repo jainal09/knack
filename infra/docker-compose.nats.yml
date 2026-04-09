@@ -7,14 +7,16 @@ services:
         limits:
           cpus: "${BENCH_CPUS:-2.0}"
           memory: "${BENCH_MEMORY:-4g}"
-    command: >
-      -c /etc/nats/nats-server.conf
+    entrypoint: ["/bin/sh", "/etc/nats/nats-entrypoint.sh"]
+    environment:
+      NATS_MAX_MEM: "${NATS_MAX_MEM:-256MB}"
+      NATS_MAX_FILE: "${NATS_MAX_FILE:-10GB}"
     ports:
       - "4222:4222"
       - "8222:8222"
     volumes:
       - nats_data:/data
-      - ./nats-server.conf:/etc/nats/nats-server.conf:ro
+      - ./nats-entrypoint.sh:/etc/nats/nats-entrypoint.sh:ro
     healthcheck:
       test: [ "CMD", "wget", "--spider", "-q", "http://localhost:8222/healthz" ]
       interval: 5s

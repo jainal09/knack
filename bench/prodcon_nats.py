@@ -33,6 +33,7 @@ DURATION = int(_cfg("TEST_DURATION_SEC"))
 PAYLOAD = b"x" * int(_cfg("PAYLOAD_BYTES"))
 NUM_PROD = int(_cfg("NUM_PRODUCERS"))
 NUM_CONS = int(_cfg("NUM_CONSUMERS"))
+NATS_PENDING_SIZE = int(os.environ.get("NATS_PENDING_SIZE", str(2 * 1024 * 1024)))
 
 MAX_INFLIGHT = 256
 BATCH_SIZE = 500
@@ -40,7 +41,7 @@ BATCH_SIZE = 500
 
 async def ensure_stream():
     """Create (or purge) the JetStream stream so we start from zero."""
-    nc = await nats.connect(NATS_URL)
+    nc = await nats.connect(NATS_URL, pending_size=NATS_PENDING_SIZE)
     js = nc.jetstream()
     try:
         await js.delete_stream(STREAM)
@@ -68,7 +69,7 @@ async def ensure_stream():
 
 async def _producer_worker(worker_id, stop_time):
     """Single producer coroutine inside the producer process."""
-    nc = await nats.connect(NATS_URL)
+    nc = await nats.connect(NATS_URL, pending_size=NATS_PENDING_SIZE)
     js = nc.jetstream()
 
     sent = 0
@@ -131,7 +132,7 @@ def _producer_process(num, stop_time, result_queue, count_dict):
 
 async def _producer_worker_counted(worker_id, stop_time, count_dict):
     """Producer worker that also updates shared counter dict."""
-    nc = await nats.connect(NATS_URL)
+    nc = await nats.connect(NATS_URL, pending_size=NATS_PENDING_SIZE)
     js = nc.jetstream()
 
     sent = 0
@@ -179,7 +180,7 @@ async def _consumer_worker_counted(worker_id, stop_time, count_dict):
     messages round-robin across members, just like Kafka partitions
     are assigned to consumers in the same group.id.
     """
-    nc = await nats.connect(NATS_URL)
+    nc = await nats.connect(NATS_URL, pending_size=NATS_PENDING_SIZE)
     js = nc.jetstream()
 
     sub = await js.subscribe(
@@ -341,7 +342,6 @@ def main():
             "aggregate_rate": round(cons_total_consumed / cons_total_wall, 1)
             if cons_total_wall > 0
             else 0,
-            "per_worker": consumer_results,
             "per_worker": consumer_results,
         },
     }

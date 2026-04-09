@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
 """NATS JetStream producer — max throughput benchmark.
 
-Runs NUM_PRODUCERS concurrent producer tasks for TEST_DURATION_SEC seconds.
-No artificial rate cap — the broker's resource limits are the only throttle.
-Uses asyncio with semaphore-bounded concurrency.
+Runs NUM_PRODUCERS concurrent producer tasks spread across NUM_PROC_GROUPS
+OS processes, each with its own asyncio event loop and NATS connection.
+This ensures all available CPU cores are utilised instead of being
+bottlenecked by a single Python process.
 """
 
 import asyncio
 import json
+import multiprocessing
 import os
 import sys
 import time
@@ -29,15 +31,21 @@ NATS_URL = _cfg("NATS_URL")
 STREAM = _cfg("NATS_STREAM")
 SUBJECT = _cfg("NATS_SUBJECT")
 DURATION = int(_cfg("TEST_DURATION_SEC"))
-PAYLOAD = b"x" * int(_cfg("PAYLOAD_BYTES"))
+PAYLOAD_BYTES = int(_cfg("PAYLOAD_BYTES"))
+PAYLOAD = b"x" * PAYLOAD_BYTES
 NUM_PROD = int(_cfg("NUM_PRODUCERS"))
+NATS_PENDING_SIZE = int(os.environ.get("NATS_PENDING_SIZE", str(2 * 1024 * 1024)))
+NUM_PROC_GROUPS = int(os.environ.get("NUM_PROC_GROUPS", "1"))
 
-results = []
-_sent_counts: dict[int, int] = {}  # per-worker live counters for progress display
+# Limit concurrent in-flight publishes per worker to avoid overwhelming the connection
+MAX_INFLIGHT = 256
+BATCH_SIZE = 500  # fire this many tasks per tight loop before yielding
 
 
-async def ensure_stream(js):
+async def ensure_stream():
     """Create the JetStream stream if it doesn't exist."""
+    nc = await nats.connect(NATS_URL, pending_size=NATS_PENDING_SIZE)
+    js = nc.jetstream()
     try:
         await js.add_stream(
             name=STREAM,
@@ -51,15 +59,14 @@ async def ensure_stream(js):
         print(f"Stream {STREAM} already exists", file=sys.stderr)
     except Exception as e:
         print(f"Warning creating stream: {e}", file=sys.stderr)
+    await nc.close()
 
 
-# Limit concurrent in-flight publishes per worker to avoid overwhelming the connection
-MAX_INFLIGHT = 256
-BATCH_SIZE = 500  # fire this many tasks per tight loop before yielding
+async def _producer_worker(worker_id, stop_time, count_dict):
+    """Single producer coroutine: publishes as fast as possible until stop_time."""
+    nc = await nats.connect(NATS_URL, pending_size=NATS_PENDING_SIZE)
+    js = nc.jetstream()
 
-
-async def producer_worker(worker_id, js):
-    """Single producer coroutine: publishes as fast as possible for DURATION seconds."""
     sent = 0
     errors = 0
     sem = asyncio.Semaphore(MAX_INFLIGHT)
@@ -76,64 +83,96 @@ async def producer_worker(worker_id, js):
                 if errors <= 5:
                     print(f"Worker {worker_id} publish error: {e}", file=sys.stderr)
 
-    while time.monotonic() - t0 < DURATION:
+    while time.monotonic() < stop_time:
         tasks = [asyncio.create_task(_pub()) for _ in range(BATCH_SIZE)]
         await asyncio.gather(*tasks)
-        _sent_counts[worker_id] = sent
+        count_dict[worker_id] = sent
 
-    wall = time.monotonic() - t0
-    results.append(
-        {
-            "worker": worker_id,
-            "sent": sent,
-            "errors": errors,
-            "wall_sec": round(wall, 2),
-            "avg_rate": round(sent / wall, 1),
-        }
-    )
-
-
-async def main():
-    nc = await nats.connect(NATS_URL)
-    js = nc.jetstream()
-
-    await ensure_stream(js)
-    await asyncio.sleep(1)
-
-    async def _progress_monitor():
-        with tqdm(
-            total=DURATION, unit="s", desc="NATS throughput", file=sys.stderr
-        ) as pbar:
-            for _ in range(DURATION):
-                await asyncio.sleep(1)
-                pbar.update(1)
-                pbar.set_postfix(msgs=f"{sum(_sent_counts.values()):,}")
-
-    worker_tasks = [
-        asyncio.create_task(producer_worker(i, js)) for i in range(NUM_PROD)
-    ]
-    monitor = asyncio.create_task(_progress_monitor())
-    await asyncio.gather(*worker_tasks)
-    monitor.cancel()
     await nc.close()
+    wall = time.monotonic() - t0
+    return {
+        "worker": worker_id,
+        "sent": sent,
+        "errors": errors,
+        "wall_sec": round(wall, 2),
+        "avg_rate": round(sent / wall, 1) if wall > 0 else 0,
+    }
+
+
+def _process_entry(worker_ids, stop_time, result_queue, count_dict):
+    """Entry-point for each OS process. Runs len(worker_ids) coroutines."""
+
+    async def _main():
+        tasks = [
+            asyncio.create_task(_producer_worker(wid, stop_time, count_dict))
+            for wid in worker_ids
+        ]
+        results = await asyncio.gather(*tasks)
+        for r in results:
+            result_queue.put(r)
+
+    asyncio.run(_main())
+
+
+def main():
+    # Ensure stream exists before spawning children
+    asyncio.run(ensure_stream())
+    time.sleep(1)
+
+    manager = multiprocessing.Manager()
+    result_queue = manager.Queue()
+    count_dict = manager.dict()
+
+    stop_time = time.monotonic() + DURATION
+
+    # Split workers across OS processes
+    num_groups = min(NUM_PROC_GROUPS, NUM_PROD)
+    groups = [[] for _ in range(num_groups)]
+    for i in range(NUM_PROD):
+        groups[i % num_groups].append(i)
+
+    processes = []
+    for group in groups:
+        p = multiprocessing.Process(
+            target=_process_entry,
+            args=(group, stop_time, result_queue, count_dict),
+        )
+        p.start()
+        processes.append(p)
+
+    # Progress bar in the main process
+    with tqdm(total=DURATION, unit="s", desc="NATS throughput", file=sys.stderr) as pbar:
+        for _ in range(DURATION):
+            time.sleep(1)
+            pbar.update(1)
+            pbar.set_postfix(msgs=f"{sum(count_dict.values()):,}")
+
+    for p in processes:
+        p.join(timeout=30)
+
+    # Collect results
+    results = []
+    while not result_queue.empty():
+        results.append(result_queue.get_nowait())
 
     total_sent = sum(r["sent"] for r in results)
-    total_wall = max(r["wall_sec"] for r in results)
+    total_wall = max(r["wall_sec"] for r in results) if results else 0
     total_errors = sum(r["errors"] for r in results)
 
     output = {
         "broker": "nats",
         "num_producers": NUM_PROD,
-        "payload_bytes": int(_cfg("PAYLOAD_BYTES")),
+        "num_processes": num_groups,
+        "payload_bytes": PAYLOAD_BYTES,
         "duration_sec": DURATION,
         "total_sent": total_sent,
         "total_errors": total_errors,
         "wall_sec": total_wall,
-        "aggregate_rate": round(total_sent / total_wall, 1),
+        "aggregate_rate": round(total_sent / total_wall, 1) if total_wall > 0 else 0,
         "per_worker": results,
     }
     print(json.dumps(output, indent=2))
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()
