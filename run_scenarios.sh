@@ -122,22 +122,36 @@ log "Master log: $MASTER_LOG"
 # ─────────────────────────────────────────────────────────────────────────────
 
 # ─── Ctrl+C guard ───────────────────────────────────────────────────────────
+# All I/O goes directly to /dev/tty so it bypasses the exec > >(tee) redirect.
+# Single-keypress detection: y = abort, n / Enter / Esc = resume.
+# A second Ctrl+C during the prompt force-kills immediately.
 _handle_sigint() {
-  echo ""
-  printf "${_YELLOW}Ctrl+C detected. Are you sure you want to cancel? [y/N] ${_RST}"
+  printf "\n\033[1;33m⚠  Ctrl+C detected. Abort benchmark? [y = abort / n or Esc = resume] \033[0m" >/dev/tty
   trap - INT  # second Ctrl+C during prompt kills immediately
-  local answer=""
-  read -r -t 15 answer </dev/tty 2>/dev/null || answer="n"
-  case "$answer" in
-    [yY]|[yY][eE][sS])
-      printf "${_RED}Aborting benchmark run...${_RST}\n"
-      exit 130
-      ;;
-    *)
-      printf "${_GREEN}Resuming benchmark.${_RST}\n"
-      trap '_handle_sigint' INT
-      ;;
-  esac
+  local key=""
+  while true; do
+    if ! IFS= read -rsn1 -t 15 key </dev/tty 2>/dev/null; then
+      key="n"  # timeout → resume
+    fi
+    case "$key" in
+      [yY])
+        printf "\n\033[1;31mAborting benchmark run...\033[0m\n" >/dev/tty
+        exit 130
+        ;;
+      [nN]|"")
+        # n, N, or Enter → resume
+        printf "\n\033[1;32mResuming benchmark.\033[0m\n" >/dev/tty
+        break
+        ;;
+      $'\x1b')
+        # Esc — flush any trailing escape sequence bytes and resume
+        read -rsn2 -t 0.1 _ </dev/tty 2>/dev/null || true
+        printf "\n\033[1;32mResuming benchmark.\033[0m\n" >/dev/tty
+        break
+        ;;
+    esac
+  done
+  trap '_handle_sigint' INT
 }
 trap '_handle_sigint' INT
 # ─────────────────────────────────────────────────────────────────────────────
