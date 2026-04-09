@@ -62,6 +62,11 @@ ${_BOLD}COMMANDS${_RST}
       down                Stop and remove containers + volumes
       up --ui             Start with UI tools (Redpanda Console, Nui)
 
+  ${_CYAN}clean${_RST}                Remove previous benchmark results
+      --scenario NAME     Clean only a specific scenario (large|medium|small)
+      --dry-run           Show what would be deleted without removing
+      --force, -f         Skip confirmation prompt
+
   ${_CYAN}version${_RST}              Print version
   ${_CYAN}help${_RST}                 Show this help message
 
@@ -70,6 +75,9 @@ ${_BOLD}EXAMPLES${_RST}
   knack run --quick           # Quick smoke test
   knack status --watch        # Monitor progress
   knack report                # Generate reports
+  knack clean                 # Remove all previous results
+  knack clean --scenario large # Remove only 'large' scenario results
+  knack clean --dry-run       # Preview what would be deleted
   knack infra down            # Tear down
 "
 }
@@ -87,6 +95,96 @@ cmd_status() {
 
 cmd_report() {
   exec "$KNACK_ROOT/bench_report.sh" "$@"
+}
+
+cmd_clean() {
+  local results_dir="$KNACK_ROOT/results"
+  local scenario=""
+  local dry_run=0
+  local force=0
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --scenario)  scenario="$2"; shift 2 ;;
+      --dry-run)   dry_run=1; shift ;;
+      --force|-f)  force=1; shift ;;
+      *) printf "${_YELLOW}Unknown option: %s${_RST}\n" "$1"; exit 1 ;;
+    esac
+  done
+
+  # Determine target directory
+  local target="$results_dir"
+  if [[ -n "$scenario" ]]; then
+    target="$results_dir/$scenario"
+    if [[ ! -d "$target" ]]; then
+      printf "${_YELLOW}No results found for scenario '%s' (looked in %s)${_RST}\n" "$scenario" "$target"
+      exit 0
+    fi
+  fi
+
+  if [[ ! -d "$results_dir" ]]; then
+    printf "${_GREEN}Nothing to clean — no results directory found.${_RST}\n"
+    exit 0
+  fi
+
+  banner
+
+  # Collect what would be deleted
+  local items=()
+  if [[ -n "$scenario" ]]; then
+    items=("$target")
+  else
+    # Everything inside results/
+    for f in "$results_dir"/*; do
+      [[ -e "$f" ]] && items+=("$f")
+    done
+  fi
+
+  if [[ ${#items[@]} -eq 0 ]]; then
+    printf "${_GREEN}Nothing to clean.${_RST}\n"
+    exit 0
+  fi
+
+  printf "${_CYAN}The following will be removed:${_RST}\n"
+  local total_size
+  total_size=$(du -sh "$target" 2>/dev/null | cut -f1 || echo "?")
+  for f in "${items[@]}"; do
+    if [[ -d "$f" ]]; then
+      local count
+      count=$(find "$f" -type f 2>/dev/null | wc -l | tr -d ' ')
+      printf "  ${_DIM}📁 %s (%s files)${_RST}\n" "$(basename "$f")" "$count"
+    else
+      printf "  ${_DIM}📄 %s${_RST}\n" "$(basename "$f")"
+    fi
+  done
+  printf "\n  ${_BOLD}Total size: %s${_RST}\n\n" "$total_size"
+
+  if [[ $dry_run -eq 1 ]]; then
+    printf "${_YELLOW}Dry run — nothing was deleted.${_RST}\n"
+    exit 0
+  fi
+
+  if [[ $force -eq 0 ]]; then
+    printf "${_YELLOW}Remove these results? [y/N] ${_RST}"
+    local answer=""
+    read -r answer
+    case "$answer" in
+      [yY]|[yY][eE][sS]) ;;
+      *)
+        printf "${_GREEN}Cancelled.${_RST}\n"
+        exit 0
+        ;;
+    esac
+  fi
+
+  # Perform deletion
+  if [[ -n "$scenario" ]]; then
+    rm -rf "$target"
+    printf "${_GREEN}✔ Removed results for scenario '%s'${_RST}\n" "$scenario"
+  else
+    rm -rf "$results_dir"
+    printf "${_GREEN}✔ All benchmark results removed.${_RST}\n"
+  fi
 }
 
 cmd_infra() {
@@ -141,6 +239,7 @@ main() {
     run)      cmd_run "$@" ;;
     status)   cmd_status "$@" ;;
     report)   cmd_report "$@" ;;
+    clean)    cmd_clean "$@" ;;
     infra)    cmd_infra "$@" ;;
     version)  cmd_version ;;
     help|-h|--help) usage ;;
