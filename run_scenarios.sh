@@ -48,6 +48,17 @@ done
 [[ $_missing -eq 0 ]] || { echo "\nFix the above and re-run." >&2; exit 1; }
 # ─────────────────────────────────────────────────────────────────────────────
 
+# ─── Colors (defined early — used by compute_budget and display) ─────────────
+_RST='\033[0m'
+_BOLD='\033[1m'
+_DIM='\033[2m'
+_RED='\033[1;31m'
+_GREEN='\033[1;32m'
+_YELLOW='\033[1;33m'
+_CYAN='\033[1;36m'
+_BLUE='\033[1;34m'
+_MAG='\033[1;35m'
+
 # ─── Scenario definitions (defaults — overridden by --budget) ────────────────
 #              NAME     CPUS   MEMORY
 SCENARIOS=(
@@ -272,16 +283,7 @@ mkdir -p "$MASTER_RESULTS_DIR"
 MASTER_LOG="$MASTER_RESULTS_DIR/scenarios_$(date +%Y%m%d_%H%M%S).log"
 exec > >(trap '' INT; tee -a "$MASTER_LOG") 2>&1
 
-# ─── Colors ──────────────────────────────────────────────────────────────────
-_RST='\033[0m'
-_BOLD='\033[1m'
-_DIM='\033[2m'
-_RED='\033[1;31m'
-_GREEN='\033[1;32m'
-_YELLOW='\033[1;33m'
-_CYAN='\033[1;36m'
-_BLUE='\033[1;34m'
-_MAG='\033[1;35m'
+# ─── Colors (already defined above, before compute_budget) ──────────────────
 
 log() {
   printf "${_DIM}[%s]${_RST} %s\n" "$(date '+%Y-%m-%d %H:%M:%S')" "$*"
