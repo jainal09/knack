@@ -40,6 +40,7 @@ usage() {
 
 ${_BOLD}COMMANDS${_RST}
   ${_CYAN}run${_RST}                  Run the full benchmark suite
+      --budget BUDGET      Auto-configure for hardware (e.g. 16c/64g, max, 75%%)
       --quick             Quick smoke test (~45 min)
       --scenario NAME     Run a single scenario (large|medium|small)
       --list              List available scenarios
@@ -78,6 +79,9 @@ ${_BOLD}COMMANDS${_RST}
 ${_BOLD}EXAMPLES${_RST}
   knack infra up              # Start brokers
   knack run --quick           # Quick smoke test
+  knack run --budget 16c/64g  # Auto-scale for 16 CPUs / 64 GB
+  knack run --budget max      # Use all available resources
+  knack run --budget 75%%      # Use 75%% of host resources
   knack status --watch        # Monitor progress
   knack report                # Generate reports
   knack clean                 # Remove all previous results

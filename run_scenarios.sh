@@ -48,7 +48,7 @@ done
 [[ $_missing -eq 0 ]] || { echo "\nFix the above and re-run." >&2; exit 1; }
 # ─────────────────────────────────────────────────────────────────────────────
 
-# ─── Scenario definitions ────────────────────────────────────────────────────
+# ─── Scenario definitions (defaults — overridden by --budget) ────────────────
 #              NAME     CPUS   MEMORY
 SCENARIOS=(
   "large    4.0   8g"
@@ -56,15 +56,179 @@ SCENARIOS=(
   "small    2.0   2g"
 )
 
+# ─── Host hardware detection ────────────────────────────────────────────────
+_detect_host_cpus() {
+  if command -v nproc &>/dev/null; then
+    nproc
+  elif command -v sysctl &>/dev/null; then
+    sysctl -n hw.ncpu 2>/dev/null || echo "4"
+  else
+    echo "4"
+  fi
+}
+
+_detect_host_ram_gb() {
+  if command -v free &>/dev/null; then
+    free -g 2>/dev/null | awk '/^Mem:/{print $2}'
+  elif command -v sysctl &>/dev/null; then
+    local bytes
+    bytes=$(sysctl -n hw.memsize 2>/dev/null || echo "0")
+    echo $(( bytes / 1073741824 ))
+  else
+    echo "8"
+  fi
+}
+
+# ─── Budget auto-configuration ──────────────────────────────────────────────
+# Computes optimal benchmark parameters from a resource budget.
+# Inputs: "16c/64g", "max", or "75%"
+# Outputs: overrides SCENARIOS array + exports env vars for downstream scripts.
+compute_budget() {
+  local budget="$1"
+  local budget_cpus budget_ram
+
+  # ── Parse budget string ──
+  if [[ "$budget" == "max" ]]; then
+    budget_cpus=$(_detect_host_cpus)
+    budget_ram=$(_detect_host_ram_gb)
+  elif [[ "$budget" == *"%" ]]; then
+    local pct="${budget%\%}"
+    local host_cpus host_ram
+    host_cpus=$(_detect_host_cpus)
+    host_ram=$(_detect_host_ram_gb)
+    budget_cpus=$(( host_cpus * pct / 100 ))
+    budget_ram=$(( host_ram * pct / 100 ))
+    # Clamp minimums
+    [[ $budget_cpus -lt 2 ]] && budget_cpus=2
+    [[ $budget_ram -lt 2 ]] && budget_ram=2
+  elif [[ "$budget" =~ ^([0-9]+)c/([0-9]+)g$ ]]; then
+    budget_cpus="${BASH_REMATCH[1]}"
+    budget_ram="${BASH_REMATCH[2]}"
+  else
+    echo "ERROR: Invalid budget format '$budget'. Use: 16c/64g, max, or 75%" >&2
+    exit 1
+  fi
+
+  # ── Usable resources (reserve 20% for host OS + Docker + Python workers) ──
+  local usable_cpus usable_ram
+  usable_cpus=$(( budget_cpus * 80 / 100 ))
+  usable_ram=$(( budget_ram * 80 / 100 ))
+  [[ $usable_cpus -lt 2 ]] && usable_cpus=2
+  [[ $usable_ram -lt 2 ]] && usable_ram=2
+
+  # ── Scenario CPU/RAM tiers ──
+  # large  = full usable resources
+  # medium = 60% CPUs, 50% RAM
+  # small  = 30% CPUs, 25% RAM
+  local large_cpus large_ram med_cpus med_ram small_cpus small_ram
+
+  large_cpus="${usable_cpus}.0"
+  large_ram=$(( usable_ram ))
+  [[ $large_ram -lt 1 ]] && large_ram=1
+
+  med_cpus=$(( usable_cpus * 60 / 100 ))
+  [[ $med_cpus -lt 1 ]] && med_cpus=1
+  med_cpus="${med_cpus}.0"
+  med_ram=$(( usable_ram * 50 / 100 ))
+  [[ $med_ram -lt 1 ]] && med_ram=1
+
+  small_cpus=$(( usable_cpus * 30 / 100 ))
+  [[ $small_cpus -lt 1 ]] && small_cpus=1
+  small_cpus="${small_cpus}.0"
+  small_ram=$(( usable_ram * 25 / 100 ))
+  [[ $small_ram -lt 1 ]] && small_ram=1
+
+  SCENARIOS=(
+    "large    ${large_cpus}   ${large_ram}g"
+    "medium   ${med_cpus}     ${med_ram}g"
+    "small    ${small_cpus}   ${small_ram}g"
+  )
+
+  # ── Workers: up to 1 per usable core, capped at 16 ──
+  local computed_producers=$usable_cpus
+  [[ $computed_producers -lt 2 ]] && computed_producers=2
+  [[ $computed_producers -gt 16 ]] && computed_producers=16
+
+  # ── Payload: bigger RAM enables bigger messages ──
+  local computed_payload=1024
+  if [[ $usable_ram -ge 32 ]]; then
+    computed_payload=16384   # 16 KB
+  elif [[ $usable_ram -ge 16 ]]; then
+    computed_payload=4096    #  4 KB
+  elif [[ $usable_ram -ge 8 ]]; then
+    computed_payload=2048    #  2 KB
+  fi
+
+  # ── Scaling CPU levels: from usable_cpus down to 0.5 ──
+  local scaling_levels=""
+  local level=$usable_cpus
+  while [[ $level -ge 2 ]]; do
+    scaling_levels="${scaling_levels}${level}.0 "
+    level=$(( level - 2 ))
+    [[ $level -lt 2 && $level -gt 0 ]] && { scaling_levels="${scaling_levels}${level}.0 "; break; }
+  done
+  scaling_levels="${scaling_levels}1.0 0.5"
+  # Deduplicate (in case usable_cpus was 2 or 1)
+  scaling_levels=$(echo "$scaling_levels" | tr ' ' '\n' | awk '!seen[$0]++' | tr '\n' ' ' | sed 's/ $//')
+
+  # ── Duration: more resources → longer for stability ──
+  local computed_duration=300
+  if [[ $usable_cpus -ge 12 ]]; then
+    computed_duration=900
+  elif [[ $usable_cpus -ge 6 ]]; then
+    computed_duration=600
+  fi
+
+  # ── Prepopulate: scale with RAM ──
+  local computed_prepopulate=$(( usable_ram * 125000 ))
+  [[ $computed_prepopulate -lt 500000 ]] && computed_prepopulate=500000
+  [[ $computed_prepopulate -gt 5000000 ]] && computed_prepopulate=5000000
+
+  # ── Export env vars (picked up by run_all.sh → env.sh → Python) ──
+  # Only export if not already overridden by explicit CLI flags
+  export NUM_PRODUCERS="${NUM_PRODUCERS_OVERRIDE:-$computed_producers}"
+  export NUM_CONSUMERS="${NUM_CONSUMERS_OVERRIDE:-$computed_producers}"
+  export PAYLOAD_BYTES="${PAYLOAD_BYTES_OVERRIDE:-$computed_payload}"
+  export SCALING_CPU_LEVELS="${SCALING_CPU_LEVELS_OVERRIDE:-$scaling_levels}"
+  export TEST_DURATION_SEC="${TEST_DURATION_SEC_OVERRIDE:-$computed_duration}"
+  export PREPOPULATE_COUNT="${PREPOPULATE_COUNT_OVERRIDE:-$computed_prepopulate}"
+  export CLI_TOTAL_MESSAGES="${CLI_TOTAL_MESSAGES_OVERRIDE:-$computed_prepopulate}"
+
+  # ── Print the computed plan ──
+  echo ""
+  printf "${_CYAN}  ⚡ Auto-configured from budget: %d CPUs / %d GB RAM${_RST}\n" "$budget_cpus" "$budget_ram"
+  printf "${_DIM}     (usable after 20%% host reserve: %d CPUs / %d GB RAM)${_RST}\n\n" "$usable_cpus" "$usable_ram"
+  printf "${_BOLD}  ┌──────────────────────────────────────────────────────────────┐${_RST}\n"
+  printf "${_BOLD}  │  SCENARIO    BROKER CPUs    BROKER RAM     WORKERS          │${_RST}\n"
+  for s in "${SCENARIOS[@]}"; do
+    read -r sname scpus smem <<< "$s"
+    printf "  │  ${_GREEN}%-10s${_RST}  %-13s  %-13s  %-16s │\n" "$sname" "$scpus" "$smem" "$NUM_PRODUCERS"
+  done
+  printf "${_BOLD}  ├──────────────────────────────────────────────────────────────┤${_RST}\n"
+  printf "  │  Payload: ${_CYAN}%s B${_RST}  │  Duration: ${_CYAN}%ss${_RST}  │  Reps: ${_CYAN}%s${_RST}            │\n" \
+    "$PAYLOAD_BYTES" "$TEST_DURATION_SEC" "${REPS:-3}"
+  printf "  │  Scaling: ${_CYAN}%s${_RST}  │\n" "$SCALING_CPU_LEVELS"
+  printf "  │  Prepopulate: ${_CYAN}%s msgs${_RST}                                   │\n" \
+    "$(printf '%d' "$PREPOPULATE_COUNT" | awk '{len=length($0); for(i=1;i<=len;i++){printf "%s",substr($0,i,1); if((len-i)%3==0 && i!=len) printf ","}}')"
+  printf "${_BOLD}  └──────────────────────────────────────────────────────────────┘${_RST}\n"
+  echo ""
+}
+
 # ─── CLI parsing ─────────────────────────────────────────────────────────────
 SELECTED_SCENARIO=""
+BUDGET=""
 FORWARD_ARGS=()
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --scenario)
       SELECTED_SCENARIO="$2"; shift 2 ;;
+    --budget)
+      BUDGET="$2"; shift 2 ;;
     --list)
+      if [[ -n "$BUDGET" ]]; then
+        compute_budget "$BUDGET"
+      fi
       echo "Available scenarios:"
       echo "  NAME      CPUs   Memory"
       echo "  ────────  ─────  ──────"
@@ -79,6 +243,11 @@ while [[ $# -gt 0 ]]; do
       FORWARD_ARGS+=("$1"); shift ;;
   esac
 done
+
+# Apply budget if specified (must happen after CLI parsing so --list works)
+if [[ -n "$BUDGET" ]]; then
+  compute_budget "$BUDGET"
+fi
 
 # ─── Filter scenarios ────────────────────────────────────────────────────────
 ACTIVE_SCENARIOS=()

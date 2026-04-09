@@ -13,6 +13,8 @@ export REPS="${REPS:-3}"                               # Number of repetitions; 
 
 export NUM_CONSUMERS="${NUM_CONSUMERS:-4}"
 export SCALING_CPU_LEVELS="${SCALING_CPU_LEVELS:-4.0 3.0 2.0 1.5 1.0 0.5}"
+export PREPOPULATE_COUNT="${PREPOPULATE_COUNT:-500000}"
+export CLI_TOTAL_MESSAGES="${CLI_TOTAL_MESSAGES:-500000}"
 
 export KAFKA_BROKER="localhost:9092"
 export NATS_URL="nats://localhost:4222"
