@@ -58,6 +58,14 @@ ${_BOLD}COMMANDS${_RST}
   ${_CYAN}report${_RST}               Generate Markdown benchmark report
       --scenario NAME(s)  Specific scenario(s)
 
+  ${_CYAN}errors${_RST}               Export benchmark and log errors
+      export              Export all collected errors
+      --scenario NAME(s)  Specific scenario(s)
+      --format FORMAT     json or csv (default: json)
+      --output PATH       Output file path, or - for stdout
+      --logs-only         Export runtime log errors only
+      --metrics-only      Export benchmark metric errors only
+
   ${_CYAN}infra${_RST}                Manage broker infrastructure
       up                  Start Kafka + NATS containers
       down                Stop and remove containers + volumes
@@ -84,6 +92,7 @@ ${_BOLD}EXAMPLES${_RST}
   knack run --budget 75%%      # Use 75%% of host resources
   knack status --watch        # Monitor progress
   knack report                # Generate reports
+  knack errors export         # Export errors to results/errors_export_*.json
   knack clean                 # Remove all previous results
   knack clean --scenario large # Remove only 'large' scenario results
   knack clean --dry-run       # Preview what would be deleted
@@ -106,6 +115,33 @@ cmd_status() {
 
 cmd_report() {
   exec "$KNACK_ROOT/bench_report.sh" "$@"
+}
+
+cmd_errors() {
+  local action="${1:-export}"
+  if [[ $# -gt 0 ]]; then
+    shift
+  fi
+
+  case "$action" in
+    export)
+      exec uv run python3 "$KNACK_ROOT/bench/export_errors.py" "$@"
+      ;;
+    --help|-h|help)
+      printf "${_BOLD}Usage:${_RST} knack errors export [options]\n"
+      printf "       ${_DIM}(or: knack errors [options])${_RST}\n\n"
+      printf "Options:\n"
+      printf "  --scenario NAME(s)  Specific scenario(s)\n"
+      printf "  --results-dir DIR   Results directory to scan\n"
+      printf "  --format FORMAT     json or csv (default: json)\n"
+      printf "  --output PATH       Output file path, or - for stdout\n"
+      printf "  --logs-only         Export runtime log errors only\n"
+      printf "  --metrics-only      Export benchmark metric errors only\n"
+      ;;
+    *)
+      exec uv run python3 "$KNACK_ROOT/bench/export_errors.py" "$action" "$@"
+      ;;
+  esac
 }
 
 cmd_clean() {
@@ -383,6 +419,7 @@ main() {
     run)         cmd_run "$@" ;;
     status)      cmd_status "$@" ;;
     report)      cmd_report "$@" ;;
+    errors)      cmd_errors "$@" ;;
     clean)       cmd_clean "$@" ;;
     infra)       cmd_infra "$@" ;;
     kill)        cmd_kill "$@" ;;

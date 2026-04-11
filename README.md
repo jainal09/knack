@@ -106,6 +106,8 @@ knack <command> [options]
 | `knack status --watch` | Live watch mode (auto-refresh, auto-exit) |
 | `knack report` | Generate Markdown reports for all completed scenarios |
 | `knack report --scenario large` | Report for a specific scenario |
+| `knack errors export` | Export benchmark metric errors and log errors |
+| `knack errors export --format csv` | Export errors as CSV instead of JSON |
 | `knack infra up` | Start Kafka + NATS broker containers |
 | `knack infra up --ui` | Start with UI tools (Redpanda Console, Nui) |
 | `knack infra down` | Stop and remove containers + volumes |
@@ -314,6 +316,23 @@ uv run python3 bench/visualize.py --compare    # cross-scenario comparison
 ```bash
 uv run python3 bench/aggregate_results.py
 ```
+
+### Export errors
+
+Run this on a remote instance to bundle benchmark error metrics and runtime log errors into one file:
+
+```bash
+knack errors export
+knack errors export --format csv
+knack errors export --scenario large --output /tmp/knack-errors.json
+knack errors export --logs-only --output -
+```
+
+By default this writes `results/errors_export_<timestamp>.json`. The export includes:
+
+- Metric errors from scenario artifacts such as `*_throughput_run*.json`, `*_consumer_run*.json`, `*_prodcon.json`, and `*_mem_*.json`
+- Runtime error lines parsed from scenario logs `results/{scenario}/benchmark_*.log`
+- Runtime error lines from multi-scenario master logs `results/scenarios_*.log`
 
 ## Where Results Live
 
