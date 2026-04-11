@@ -18,6 +18,12 @@ import nats
 from dotenv import dotenv_values
 from tqdm import tqdm
 
+from bench.nats_async_publish import (
+    JetStreamAsyncPublisher,
+    NATS_JS_API_TIMEOUT,
+    NATS_JS_ASYNC_MAX_PENDING,
+)
+
 _env = dotenv_values(Path(__file__).resolve().parent.parent / "nats-client.env")
 
 
@@ -37,15 +43,16 @@ PREPOPULATE_COUNT = int(os.environ.get("PREPOPULATE_COUNT", "500000"))
 NATS_PENDING_SIZE = int(os.environ.get("NATS_PENDING_SIZE", str(2 * 1024 * 1024)))
 NUM_PROC_GROUPS = int(os.environ.get("NUM_PROC_GROUPS", "1"))
 
-# Pre-population concurrency controls
-MAX_INFLIGHT = 256
 BATCH_SIZE = 500
 
 
 async def ensure_stream():
     """Create the JetStream stream if it doesn't exist."""
     nc = await nats.connect(NATS_URL, pending_size=NATS_PENDING_SIZE)
-    js = nc.jetstream()
+    js = nc.jetstream(
+        timeout=NATS_JS_API_TIMEOUT,
+        publish_async_max_pending=NATS_JS_ASYNC_MAX_PENDING,
+    )
     try:
         await js.add_stream(
             name=STREAM,
@@ -67,29 +74,27 @@ def _prepop_process(count, count_dict, proc_id):
 
     async def _run():
         nc = await nats.connect(NATS_URL, pending_size=NATS_PENDING_SIZE)
-        js = nc.jetstream()
-        sent = 0
-        errors = 0
-        sem = asyncio.Semaphore(MAX_INFLIGHT)
+        js = nc.jetstream(
+            timeout=NATS_JS_API_TIMEOUT,
+            publish_async_max_pending=NATS_JS_ASYNC_MAX_PENDING,
+        )
         payload = b"x" * PAYLOAD_BYTES
-
-        async def _pub():
-            nonlocal sent, errors
-            async with sem:
-                try:
-                    await js.publish(SUBJECT, payload)
-                    sent += 1
-                except Exception:
-                    errors += 1
+        publisher = JetStreamAsyncPublisher(
+            js,
+            SUBJECT,
+            payload=payload,
+            max_pending=NATS_JS_ASYNC_MAX_PENDING,
+            error_prefix=f"Pre-populate worker {proc_id}",
+        )
 
         remaining = count
         while remaining > 0:
             batch = min(BATCH_SIZE, remaining)
-            tasks = [asyncio.create_task(_pub()) for _ in range(batch)]
-            await asyncio.gather(*tasks)
+            await publisher.submit_many(batch, payload)
             remaining -= batch
-            count_dict[proc_id] = sent
+            count_dict[proc_id] = publisher.sent
 
+        await publisher.flush()
         await nc.close()
 
     asyncio.run(_run())

@@ -292,7 +292,7 @@ for p in ['p50_us','p95_us','p99_us','p999_us','max_us']:
 
 ## 5. Memory Stress
 
-> **What this measures:** Broker stability under progressively restricted Docker memory limits (4g → 512m). For each level the producer benchmark runs and records throughput + errors. PASS = broker stays alive and serves traffic. "Errors" are **produce() call failures** — typically BufferError (producer queue overflow) or broker rejections when memory pressure causes slow message acceptance. NATS shows 0 errors because its backpressure design rejects at the protocol level rather than partially accepting.
+> **What this measures:** Broker stability under progressively restricted Docker memory limits (4g → 512m). For each level the producer benchmark runs and records throughput + errors. PASS = broker stays alive and serves traffic. "Errors" include publish enqueue failures and publish-ack delivery failures under load or memory pressure.
 
 TABLE
   [[ -f "$charts_dir/05_memory_stress.png" ]] && echo "![Memory Stress](charts/05_memory_stress.png)" >> "$out"
@@ -376,7 +376,7 @@ print(f'| **Median** | **{km:,.1f}** | **{nm:,.1f}** |')
 
 ## 8. Simultaneous Producer + Consumer
 
-> **What this measures:** Throughput when producers and consumers run concurrently (the realistic scenario). Shows whether the broker can handle bidirectional traffic without degradation. The P/C ratio reveals backpressure behaviour. "Producer errors" = failed produce() calls (queue buffer overflow or broker rejection under load).
+> **What this measures:** Throughput when producers and consumers run concurrently (the realistic scenario). Shows whether the broker can handle bidirectional traffic without degradation. The P/C ratio reveals backpressure behaviour. "Producer errors" include enqueue failures and publish-ack delivery failures under load.
 
 TABLE
   [[ -f "$charts_dir/08_prodcon.png" ]] && echo "![ProdCon](charts/08_prodcon.png)" >> "$out"
@@ -531,7 +531,7 @@ for b in ['kafka', 'nats']:
 
 ## 14. Error Rate Breakdown
 
-> **What this shows:** Total produce() failures across all tests. Kafka errors are typically BufferError (producer queue full) or broker delivery failures under load/memory pressure. NATS uses protocol-level backpressure, so the Python client sees 0 exceptions. Lower is better.
+> **What this shows:** Total producer-side failures across all tests. Errors include enqueue stalls/failures and publish-ack delivery failures under load or memory pressure. Lower is better.
 
 TABLE
   [[ -f "$charts_dir/14_error_breakdown.png" ]] && echo "![Error Breakdown](charts/14_error_breakdown.png)" >> "$out"

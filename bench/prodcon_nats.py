@@ -18,6 +18,12 @@ import nats
 from dotenv import dotenv_values
 from tqdm import tqdm
 
+from bench.nats_async_publish import (
+    JetStreamAsyncPublisher,
+    NATS_JS_API_TIMEOUT,
+    NATS_JS_ASYNC_MAX_PENDING,
+)
+
 _env = dotenv_values(Path(__file__).resolve().parent.parent / "nats-client.env")
 
 
@@ -35,14 +41,16 @@ NUM_PROD = int(_cfg("NUM_PRODUCERS"))
 NUM_CONS = int(_cfg("NUM_CONSUMERS"))
 NATS_PENDING_SIZE = int(os.environ.get("NATS_PENDING_SIZE", str(2 * 1024 * 1024)))
 
-MAX_INFLIGHT = 256
 BATCH_SIZE = 500
 
 
 async def ensure_stream():
     """Create (or purge) the JetStream stream so we start from zero."""
     nc = await nats.connect(NATS_URL, pending_size=NATS_PENDING_SIZE)
-    js = nc.jetstream()
+    js = nc.jetstream(
+        timeout=NATS_JS_API_TIMEOUT,
+        publish_async_max_pending=NATS_JS_ASYNC_MAX_PENDING,
+    )
     try:
         await js.delete_stream(STREAM)
         print(f"Deleted old stream {STREAM}", file=sys.stderr)
@@ -67,40 +75,44 @@ async def ensure_stream():
 # ---------------------------------------------------------------------------
 
 
-async def _producer_worker(worker_id, stop_time):
+async def _run_producer_worker(worker_id, stop_time, count_dict=None):
     """Single producer coroutine inside the producer process."""
     nc = await nats.connect(NATS_URL, pending_size=NATS_PENDING_SIZE)
-    js = nc.jetstream()
-
-    sent = 0
-    errors = 0
-    sem = asyncio.Semaphore(MAX_INFLIGHT)
+    js = nc.jetstream(
+        timeout=NATS_JS_API_TIMEOUT,
+        publish_async_max_pending=NATS_JS_ASYNC_MAX_PENDING,
+    )
+    publisher = JetStreamAsyncPublisher(
+        js,
+        SUBJECT,
+        payload=PAYLOAD,
+        max_pending=NATS_JS_ASYNC_MAX_PENDING,
+        error_prefix=f"Producer {worker_id}",
+    )
     t0 = time.monotonic()
 
-    async def _pub():
-        nonlocal sent, errors
-        async with sem:
-            try:
-                await js.publish(SUBJECT, PAYLOAD)
-                sent += 1
-            except Exception as e:
-                errors += 1
-                if errors <= 5:
-                    print(f"Producer {worker_id} error: {e}", file=sys.stderr)
-
     while time.monotonic() < stop_time:
-        tasks = [asyncio.create_task(_pub()) for _ in range(BATCH_SIZE)]
-        await asyncio.gather(*tasks)
+        await publisher.submit_many(BATCH_SIZE)
+        if count_dict is not None:
+            count_dict[worker_id] = publisher.sent
 
+    await publisher.flush()
     await nc.close()
     wall = time.monotonic() - t0
     return {
         "worker": worker_id,
-        "sent": sent,
-        "errors": errors,
+        "sent": publisher.sent,
+        "accepted": publisher.accepted,
+        "errors": publisher.total_errors,
+        "enqueue_errors": publisher.enqueue_errors,
+        "ack_errors": publisher.ack_errors,
         "wall_sec": round(wall, 2),
-        "avg_rate": round(sent / wall, 1) if wall > 0 else 0,
+        "avg_rate": round(publisher.sent / wall, 1) if wall > 0 else 0,
     }
+
+
+async def _producer_worker(worker_id, stop_time):
+    return await _run_producer_worker(worker_id, stop_time)
 
 
 async def _run_producers(num, stop_time):
@@ -132,39 +144,7 @@ def _producer_process(num, stop_time, result_queue, count_dict):
 
 async def _producer_worker_counted(worker_id, stop_time, count_dict):
     """Producer worker that also updates shared counter dict."""
-    nc = await nats.connect(NATS_URL, pending_size=NATS_PENDING_SIZE)
-    js = nc.jetstream()
-
-    sent = 0
-    errors = 0
-    sem = asyncio.Semaphore(MAX_INFLIGHT)
-    t0 = time.monotonic()
-
-    async def _pub():
-        nonlocal sent, errors
-        async with sem:
-            try:
-                await js.publish(SUBJECT, PAYLOAD)
-                sent += 1
-            except Exception as e:
-                errors += 1
-                if errors <= 5:
-                    print(f"Producer {worker_id} error: {e}", file=sys.stderr)
-
-    while time.monotonic() < stop_time:
-        tasks = [asyncio.create_task(_pub()) for _ in range(BATCH_SIZE)]
-        await asyncio.gather(*tasks)
-        count_dict[worker_id] = sent
-
-    await nc.close()
-    wall = time.monotonic() - t0
-    return {
-        "worker": worker_id,
-        "sent": sent,
-        "errors": errors,
-        "wall_sec": round(wall, 2),
-        "avg_rate": round(sent / wall, 1) if wall > 0 else 0,
-    }
+    return await _run_producer_worker(worker_id, stop_time, count_dict)
 
 
 # ---------------------------------------------------------------------------
@@ -309,6 +289,7 @@ def main():
 
     # Aggregate producer results
     prod_total_sent = sum(r["sent"] for r in producer_results)
+    prod_total_accepted = sum(r.get("accepted", r["sent"]) for r in producer_results)
     prod_total_wall = (
         max(r["wall_sec"] for r in producer_results) if producer_results else 0
     )
@@ -329,6 +310,7 @@ def main():
         "duration_sec": DURATION,
         "producer": {
             "total_sent": prod_total_sent,
+            "total_accepted": prod_total_accepted,
             "total_errors": prod_total_errors,
             "wall_sec": prod_total_wall,
             "aggregate_rate": round(prod_total_sent / prod_total_wall, 1)

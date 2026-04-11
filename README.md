@@ -152,6 +152,10 @@ All parameters live in `env.sh` and can be overridden with environment variables
 | `TEST_DURATION_SEC` | `600` | Throughput test duration (seconds) |
 | `REPS` | `3` | Throughput repetitions |
 | `SCALING_CPU_LEVELS` | `4.0 3.0 2.0 1.5 1.0 0.5` | CPU levels for scaling test |
+| `NATS_JS_API_TIMEOUT` | `30` | JetStream API / publish-ack timeout in seconds |
+| `NATS_JS_ASYNC_MAX_PENDING` | `4000` | Max in-flight async JetStream publish acks |
+| `NATS_JS_STALL_TIMEOUT` | `30` | Max wait when NATS async publish queue is stalled |
+| `NATS_JS_ACK_TIMEOUT` | `30` | Max wait for async publish ack drain at shutdown |
 
 Scenario hardware profiles:
 

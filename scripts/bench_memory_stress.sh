@@ -36,12 +36,12 @@ for MEM in "${MEMORY_LEVELS[@]}"; do
   local_mb=$(_mem_to_mb "$MEM")
 
   # NATS server max_mem: 50% of broker RAM, min 64MB
-  local nats_mem_mb=$(( local_mb / 2 ))
+  nats_mem_mb=$(( local_mb / 2 ))
   [[ $nats_mem_mb -lt 64 ]] && nats_mem_mb=64
   export NATS_MAX_MEM="${nats_mem_mb}MB"
 
   # Reduce producers for low-memory tiers to avoid overwhelming
-  local stress_producers="${NUM_PRODUCERS:-4}"
+  stress_producers="${NUM_PRODUCERS:-4}"
   if [[ $local_mb -le 512 ]]; then
     stress_producers=2
     export KAFKA_QUEUE_MAX=10000

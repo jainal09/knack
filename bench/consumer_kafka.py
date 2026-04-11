@@ -68,12 +68,15 @@ def _prepop_worker(count, count_dict, proc_id):
     )
     payload = b"x" * PAYLOAD_BYTES
     sent = 0
+    acked = 0
     errors = 0
 
     def _on_delivery(err, msg):
-        nonlocal errors
+        nonlocal acked, errors
         if err is not None:
             errors += 1
+        else:
+            acked += 1
 
     for i in range(count):
         try:
@@ -88,10 +91,12 @@ def _prepop_worker(count, count_dict, proc_id):
                 errors += 1
         if sent % 5000 == 0:
             p.poll(0)
-            count_dict[proc_id] = sent
+            count_dict[proc_id] = acked
 
-    p.flush(timeout=KAFKA_FLUSH_TIMEOUT)
-    count_dict[proc_id] = sent
+    remaining = p.flush(timeout=KAFKA_FLUSH_TIMEOUT)
+    if remaining > 0:
+        errors += remaining
+    count_dict[proc_id] = acked
 
 
 def prepopulate():

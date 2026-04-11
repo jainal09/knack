@@ -40,11 +40,6 @@ KAFKA_FLUSH_TIMEOUT = int(os.environ.get("KAFKA_FLUSH_TIMEOUT", "30"))
 BATCH_SIZE = 500
 
 
-def delivery_report(err, msg):
-    if err is not None:
-        sys.stderr.write(f"Delivery failed: {err}\n")
-
-
 def ensure_topic():
     """Create the prodcon benchmark topic if it doesn't exist."""
     admin = AdminClient({"bootstrap.servers": BROKER})
@@ -75,34 +70,54 @@ def _producer_process(worker_id, stop_time, result_queue, count_dict):
     )
 
     payload = b"x" * PAYLOAD_BYTES
-    sent = 0
-    errors = 0
+    enqueued = 0
+    enqueue_errors = 0
+    acked = 0
+    delivery_errors = 0
     t0 = time.monotonic()
+
+    def on_delivery(err, msg):
+        nonlocal acked, delivery_errors
+        if err is not None:
+            delivery_errors += 1
+            if delivery_errors <= 5:
+                sys.stderr.write(f"Producer {worker_id} delivery failed: {err}\n")
+        else:
+            acked += 1
 
     while time.monotonic() < stop_time:
         for _ in range(BATCH_SIZE):
             try:
-                p.produce(TOPIC, payload, callback=delivery_report)
-                sent += 1
+                p.produce(TOPIC, payload, callback=on_delivery)
+                enqueued += 1
             except BufferError:
                 p.poll(0.1)
                 try:
-                    p.produce(TOPIC, payload, callback=delivery_report)
-                    sent += 1
+                    p.produce(TOPIC, payload, callback=on_delivery)
+                    enqueued += 1
                 except Exception:
-                    errors += 1
+                    enqueue_errors += 1
         p.poll(0)
-        count_dict[worker_id] = sent
+        count_dict[worker_id] = acked
 
-    p.flush(timeout=KAFKA_FLUSH_TIMEOUT)
+    remaining = p.flush(timeout=KAFKA_FLUSH_TIMEOUT)
+    if remaining > 0:
+        delivery_errors += remaining
+        sys.stderr.write(
+            f"Producer {worker_id} flush timed out with {remaining} undelivered messages\n"
+        )
     wall = time.monotonic() - t0
+    total_errors = enqueue_errors + delivery_errors
 
     result_queue.put(("producer", {
         "worker": worker_id,
-        "sent": sent,
-        "errors": errors,
+        "sent": acked,
+        "accepted": enqueued,
+        "errors": total_errors,
+        "enqueue_errors": enqueue_errors,
+        "ack_errors": delivery_errors,
         "wall_sec": round(wall, 2),
-        "avg_rate": round(sent / wall, 1),
+        "avg_rate": round(acked / wall, 1),
     }))
 
 
@@ -220,6 +235,7 @@ def main():
 
     # Aggregate
     prod_total_sent = sum(r["sent"] for r in producer_results)
+    prod_total_accepted = sum(r.get("accepted", r["sent"]) for r in producer_results)
     prod_total_wall = max(r["wall_sec"] for r in producer_results) if producer_results else 0
     prod_total_errors = sum(r["errors"] for r in producer_results)
 
@@ -235,6 +251,7 @@ def main():
         "duration_sec": DURATION,
         "producer": {
             "total_sent": prod_total_sent,
+            "total_accepted": prod_total_accepted,
             "total_errors": prod_total_errors,
             "wall_sec": prod_total_wall,
             "aggregate_rate": round(prod_total_sent / prod_total_wall, 1) if prod_total_wall > 0 else 0,
